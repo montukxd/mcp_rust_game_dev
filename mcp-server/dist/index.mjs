@@ -54417,6 +54417,7 @@ var import_websocket_server = __toESM(require_websocket_server(), 1);
 var wrapper_default = import_websocket.default;
 
 // src/rcon/client.ts
+var LOG_PREFIX = "[rust-oxide-dev] RCON";
 var RconClient = class {
   ws = null;
   identifierCounter = 1;
@@ -54426,9 +54427,14 @@ var RconClient = class {
   requestTimeout = 1e4;
   isConnecting = false;
   shouldReconnect = true;
+  reconnectScheduled = false;
   host;
   port;
   password;
+  /** Callback when connection is lost — MCP stays running, user gets notified via stderr */
+  onConnectionLost;
+  /** Callback when reconnected successfully */
+  onReconnected;
   constructor() {
     this.host = process.env.RUST_RCON_HOST || "127.0.0.1";
     this.port = parseInt(process.env.RUST_RCON_PORT || "28016", 10);
@@ -54455,10 +54461,16 @@ var RconClient = class {
       this.ws.on("message", (data2) => {
         this.handleMessage(data2);
       });
-      this.ws.on("close", () => {
+      this.ws.on("close", (code, reason) => {
         clearTimeout(connectTimeout);
         this.isConnecting = false;
-        this.rejectAllPending("Connection closed");
+        this.ws = null;
+        const reasonStr = reason?.toString() || `code ${code ?? "unknown"}`;
+        this.rejectAllPending(`RCON connection closed: ${reasonStr}`);
+        console.error(
+          `${LOG_PREFIX}: Connection lost (${reasonStr}). MCP stays running. Reconnecting\u2026`
+        );
+        this.onConnectionLost?.(reasonStr);
         if (this.shouldReconnect) {
           this.scheduleReconnect();
         }
@@ -54467,6 +54479,7 @@ var RconClient = class {
         clearTimeout(connectTimeout);
         this.isConnecting = false;
         if (this.ws?.readyState !== wrapper_default.OPEN) {
+          console.error(`${LOG_PREFIX}: Connection error:`, err.message);
           reject(err);
         }
       });
@@ -54493,13 +54506,28 @@ var RconClient = class {
     }
   }
   scheduleReconnect() {
+    if (this.reconnectScheduled) return;
+    this.reconnectScheduled = true;
     const delay = Math.min(
       1e3 * Math.pow(2, this.reconnectAttempts),
       this.maxReconnectDelay
     );
     this.reconnectAttempts++;
+    console.error(
+      `${LOG_PREFIX}: Reconnect attempt #${this.reconnectAttempts} in ${delay}ms`
+    );
     setTimeout(() => {
-      this.connect().catch(() => {
+      this.reconnectScheduled = false;
+      this.connect().then(() => {
+        console.error(`${LOG_PREFIX}: Reconnected successfully`);
+        this.onReconnected?.();
+      }).catch((err) => {
+        console.error(
+          `${LOG_PREFIX}: Reconnect failed: ${err.message}. Next attempt scheduled.`
+        );
+        if (this.shouldReconnect) {
+          this.scheduleReconnect();
+        }
       });
     }, delay);
   }
@@ -54734,7 +54762,7 @@ function sleep(ms) {
 function registerPluginPushTool(server) {
   server.tool(
     "rust_plugin_push",
-    "Deploy a .cs plugin to Rust server: validate \u2192 copy \u2192 compile \u2192 check errors. Returns step-by-step diagnostics and raw RCON output. WHEN TO USE: After meaningful code changes (new hook, new command, bug fix). Do NOT push mid-edit when the file is knowingly incomplete.",
+    "Deploy a .cs plugin to Rust server: validate \u2192 copy \u2192 (when RCON available) o.reload \u2192 verify load \u2192 parse errors. Works WITHOUT RCON: file is copied, verification skipped (rconUnavailable: true). ALWAYS use after any code change. Returns errors \u2014 fix and redeploy until success.",
     {
       file_path: external_exports.string().describe("Absolute path to the .cs plugin file in workspace")
     },
@@ -54816,14 +54844,10 @@ function registerPluginPushTool(server) {
           result.steps.push(`\u2713 RCON connected to ${process.env.RUST_RCON_HOST}:${process.env.RUST_RCON_PORT}`);
         } catch (rconErr) {
           const msg = rconErr instanceof Error ? rconErr.message : String(rconErr);
-          result.steps.push(`\u2717 RCON connection failed: ${msg}`);
-          result.errors = [{
-            file: `${meta.name}.cs`,
-            line: 0,
-            column: 0,
-            message: `File deployed but RCON failed: ${msg}. Check RCON host/port/password.`,
-            severity: "error"
-          }];
+          result.steps.push(`\u26A0 RCON unavailable: ${msg}. Deploy succeeded; verification skipped.`);
+          result.rconUnavailable = true;
+          result.success = true;
+          result.pluginInfo = { name: meta.name, version: meta.version, author: meta.author };
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         }
         try {
@@ -73024,7 +73048,7 @@ function suggestFix(error2) {
 function registerRuntimeErrorTools(server) {
   server.tool(
     "rust_check_runtime_errors",
-    "Parse runtime errors from Oxide logs with fix suggestions. WHEN TO USE: After the user tests plugin functionality (runs commands, triggers hooks) and reports issues, or after deploying a plugin that interacts with players/entities. Do NOT use immediately after every push \u2014 runtime errors only appear when plugin code is actually exercised.",
+    "Parse runtime errors from Oxide logs with fix suggestions. Works without RCON if RUST_SERVER_PATH is set (reads local logs). ALWAYS run after successful rust_plugin_push when RCON is available. Also use when user reports issues.",
     {
       plugin_name: external_exports.string().optional().describe("Filter errors by plugin name"),
       lines: external_exports.number().optional().default(200).describe("Number of recent log lines to scan (default 200)"),
@@ -74676,10 +74700,10 @@ process.on("uncaughtException", (err) => {
   console.error("[rust-oxide-dev] Uncaught exception:", err);
 });
 function createServer(displayName) {
-  const server = new McpServer({
-    name: displayName,
-    version: "1.0.0"
-  });
+  const server = new McpServer(
+    { name: displayName, version: "1.0.0" },
+    { capabilities: { logging: {} } }
+  );
   registerPluginPushTool(server);
   registerPluginManageTools(server);
   registerServerInfoTools(server);
@@ -74818,32 +74842,38 @@ You have access to MCP tools for automated plugin development. Each tool has a c
 
 ## Tool Invocation Policy \u2014 Phase Model
 
-### Phase A: Research (before writing code)
+### Phase A: Research (before writing code) \u2014 works WITHOUT RCON
 - \`rust_docs_search_hook\` / \`rust_docs_search_api\` \u2014 find hooks and API. Do this before coding. Skip if already looked up in this session.
 - \`rust_docs_get_hook\` \u2014 get exact hook signature. Use for every unfamiliar hook.
 - \`rust_docs_get_examples\` \u2014 reference implementations for complex patterns (CUI, WebRequest).
+- Documentation search and plugin development work even when RCON is disconnected.
 
-### Phase B: Active Development (iterating on code)
-- \`rust_plugin_push\` \u2014 deploy after **meaningful** changes (new hook, command, bug fix). Do NOT push mid-edit or after trivial changes (comment, rename, whitespace).
-- \`rust_grant_permission\` \u2014 ONLY on first push with new permissions. Not every push.
-- \`rust_read_config\` \u2014 ONLY on first push with config or after config structure change. Not every push.
-- \`rust_plugin_load/unload/reload\` \u2014 manual lifecycle control when needed.
-- \`rust_watch_directory\` \u2014 ONLY when user explicitly asks for auto-deploy. Not by default.
+### Phase B: Deploy \u2014 Fix \u2014 Redeploy Loop (MANDATORY after code changes)
+After **any** change to plugin code:
+1. **Deploy**: \`rust_plugin_push\` \u2014 ALWAYS run after saving changes. Deploy works even without RCON (file is copied; verification skipped).
+2. **Check**: rust_plugin_push returns compilation errors in \`errors\`. If \`errors\` is present \u2014 fix them immediately.
+3. **Redeploy**: Run \`rust_plugin_push\` again. Repeat until \`success: true\` and no errors.
+- \`rust_grant_permission\` \u2014 ONLY on first push with new permissions.
+- \`rust_read_config\` \u2014 ONLY on first push with config or after config structure change.
+- \`rust_plugin_load/unload/reload\` \u2014 manual lifecycle when needed (requires RCON).
 
-### Phase C: Stabilization (plugin compiles, testing for issues)
-- \`rust_check_runtime_errors\` \u2014 ONLY after user tests plugin and reports issues, or after deploying complex entity/player logic. NOT after every push.
-- \`rust_plugin_performance\` \u2014 ONLY for plugins with heavy hooks (OnTick, OnEntityTakeDamage) or when user reports lag. Needs server activity to be meaningful.
+### Phase C: Post-deploy verification (when RCON available)
+- \`rust_check_runtime_errors\` \u2014 ALWAYS run after successful deploy (when RCON is up) to verify no runtime errors in logs.
+- \`rust_plugin_performance\` \u2014 ONLY for plugins with heavy hooks or when user reports lag.
 
 ### Phase D: Finalization (plugin is feature-complete)
-- \`rust_generate_tests\` \u2014 ONLY when plugin is stable (compiles, no known errors, has 2+ features). NOT during active development.
-- \`rust_generate_docs\` \u2014 ONLY when user says plugin is done / ready for release. NOT during active development.
+- \`rust_generate_tests\` \u2014 ONLY when plugin is stable. NOT during active development.
+- \`rust_generate_docs\` \u2014 ONLY when user says plugin is done. NOT during active development.
 
 ### Anti-patterns \u2014 DO NOT:
-- Push after every minor edit
-- Check runtime errors immediately after push with no server activity
+- Skip rust_plugin_push after code changes
+- Leave compilation errors unfixed \u2014 fix and redeploy immediately
 - Generate tests/docs while features are still being added
-- Check performance on plugins with zero traffic
 - Start file watcher without user asking for it
+
+## RCON CONNECTION STATUS
+
+If any RCON tool returns an error about connection (e.g. "Connection closed", "RCON connection lost", "timeout", "ECONNREFUSED") \u2014 **immediately** inform the user in Russian: "\u0421\u043E\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u0435 \u0441 RCON \u043F\u043E\u0442\u0435\u0440\u044F\u043D\u043E. MCP \u043F\u0440\u043E\u0434\u043E\u043B\u0436\u0430\u0435\u0442 \u0440\u0430\u0431\u043E\u0442\u0430\u0442\u044C \u0438 \u043F\u044B\u0442\u0430\u0435\u0442\u0441\u044F \u043F\u0435\u0440\u0435\u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0438\u0442\u044C\u0441\u044F. \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442\u044B RCON \u0432\u0440\u0435\u043C\u0435\u043D\u043D\u043E \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u043D\u044B." Do not continue RCON-dependent actions until reconnection.
 
 ## MANDATORY ATTRIBUTION
 
@@ -74887,18 +74917,33 @@ async function verifyRconAndGetServerName() {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(
-      `[rust-oxide-dev] RCON connection failed at startup: ${msg}
-  Host: ${host}:${port}
-  Ensure +rcon.web 1 +rcon.port ${port} +rcon.password "..." in server startup.
-  MCP will not start without RCON. Fix config and restart.`
+      `[rust-oxide-dev] RCON unavailable at startup: ${msg}. MCP starts anyway (docs + deploy work without RCON).`
     );
-    process.exit(1);
+    return null;
   }
 }
 async function main() {
   const serverName = await verifyRconAndGetServerName();
   const displayName = serverName ? `rust-oxide-dev | ${serverName}` : "rust-oxide-dev";
   const server = createServer(displayName);
+  const rcon = getRconClient();
+  rcon.onConnectionLost = (reason) => {
+    const msg = `RCON \u0441\u043E\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u0435 \u043F\u043E\u0442\u0435\u0440\u044F\u043D\u043E (${reason}). MCP \u043F\u0440\u043E\u0434\u043E\u043B\u0436\u0430\u0435\u0442 \u0440\u0430\u0431\u043E\u0442\u0430\u0442\u044C, \u0438\u0434\u0451\u0442 \u043F\u0435\u0440\u0435\u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u0435. \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442\u044B RCON \u0432\u0440\u0435\u043C\u0435\u043D\u043D\u043E \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u043D\u044B.`;
+    server.sendLoggingMessage({
+      level: "error",
+      logger: "rcon",
+      data: { message: msg }
+    }).catch(() => {
+    });
+  };
+  rcon.onReconnected = () => {
+    server.sendLoggingMessage({
+      level: "info",
+      logger: "rcon",
+      data: { message: "RCON \u043F\u0435\u0440\u0435\u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0451\u043D \u0443\u0441\u043F\u0435\u0448\u043D\u043E." }
+    }).catch(() => {
+    });
+  };
   const mode = process.argv.includes("--http") ? "http" : "stdio";
   if (mode === "http") {
     const port = parseInt(process.env.MCP_PORT || "3100", 10);
