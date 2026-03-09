@@ -66,6 +66,10 @@ The config file is already in the project. Open it and fill in your values:
 
 **`RUST_SERVER_PATH`** — the folder that is the parent of `oxide/plugins/`. Find where your server keeps its plugins and set the path one level above. Example: if plugins are in `D:/MyServer/oxide/plugins/`, set `D:/MyServer`.
 
+> **Server file naming requirements** for auto-detection:
+> - **Console log** must be named `output.txt` or `output_log.txt` and located in `RUST_SERVER_PATH`. If your log has a different name or path, set `RUST_CONSOLE_LOG_PATH` in env. The MCP also reads the `-logfile` argument from the startup script if present.
+> - **Startup script** must be named `start.bat` or `run.bat` (also supports `RustDedicated.bat`, `start.cmd`, `run.cmd`, `start.sh`). If yours has a different name, set `RUST_STARTUP_FILE` in env.
+
 **`RUST_DEPLOY_MODE`** — how plugins are delivered to the server:
 
 | Mode | When to use | Required variables |
@@ -167,6 +171,7 @@ Point any MCP client to `http://localhost:3100/mcp`.
 | `rust_server_status` | Server info (map, players, version) |
 | `rust_server_fps` | FPS and health metrics |
 | `rust_read_logs` | Read Oxide logs |
+| `rust_read_console_log` | Read server console log (output.txt) with error filtering |
 
 ### Config, Data & Permissions
 | Tool | Description |

@@ -66,6 +66,10 @@ git clone https://github.com/montukxd/mcp_rust_game_dev.git
 
 **`RUST_SERVER_PATH`** — `oxide/plugins/` 的上级目录。找到服务器存放插件的位置，然后向上一级。示例：如果插件在 `D:/MyServer/oxide/plugins/`，则设置 `D:/MyServer`。
 
+> **自动检测的服务器文件命名要求**：
+> - **控制台日志**必须命名为 `output.txt` 或 `output_log.txt`，且位于 `RUST_SERVER_PATH`。若日志名称或路径不同，请在 env 中设置 `RUST_CONSOLE_LOG_PATH`。MCP 也会从启动脚本中读取 `-logfile` 参数（如存在）。
+> - **启动脚本**必须命名为 `start.bat` 或 `run.bat`（也支持 `RustDedicated.bat`、`start.cmd`、`run.cmd`、`start.sh`）。若名称不同，请在 env 中设置 `RUST_STARTUP_FILE`。
+
 **`RUST_DEPLOY_MODE`** — 插件如何传送到服务器：
 
 | 模式 | 使用场景 | 必需变量 |
@@ -167,6 +171,7 @@ node mcp_rust_game_dev/mcp-server/dist/index.mjs --http
 | `rust_server_status` | 服务器信息（地图、玩家、版本） |
 | `rust_server_fps` | FPS 与健康指标 |
 | `rust_read_logs` | 读取 Oxide 日志 |
+| `rust_read_console_log` | 读取服务器控制台日志 (output.txt)，带错误过滤 |
 
 ### 配置、数据与权限
 | 工具 | 说明 |

@@ -66,6 +66,10 @@ git clone https://github.com/montukxd/mcp_rust_game_dev.git
 
 **`RUST_SERVER_PATH`** — папка, которая является родительской для `oxide/plugins/`. Найдите, где сервер хранит плагины, и укажите путь на уровень выше. Пример: если плагины в `D:/MyServer/oxide/plugins/`, укажите `D:/MyServer`.
 
+> **Требования к именам файлов сервера** для автоопределения:
+> - **Лог консоли** должен называться `output.txt` или `output_log.txt` и находиться в `RUST_SERVER_PATH`. Если лог-файл имеет другое имя или путь — задайте `RUST_CONSOLE_LOG_PATH` в env. MCP также читает аргумент `-logfile` из скрипта запуска, если он указан.
+> - **Скрипт запуска** должен называться `start.bat` или `run.bat` (также поддерживаются `RustDedicated.bat`, `start.cmd`, `run.cmd`, `start.sh`). Если ваш файл имеет другое имя — задайте `RUST_STARTUP_FILE` в env.
+
 **`RUST_DEPLOY_MODE`** — как плагины доставляются на сервер:
 
 | Режим | Когда использовать | Обязательные переменные |
@@ -167,6 +171,7 @@ node mcp_rust_game_dev/mcp-server/dist/index.mjs --http
 | `rust_server_status` | Информация о сервере |
 | `rust_server_fps` | FPS и метрики здоровья |
 | `rust_read_logs` | Чтение логов Oxide |
+| `rust_read_console_log` | Чтение консольного лога сервера (output.txt) с фильтрацией ошибок |
 
 ### Конфигурация, данные и права
 | Инструмент | Описание |
