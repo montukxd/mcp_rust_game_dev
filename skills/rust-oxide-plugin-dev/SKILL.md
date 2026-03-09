@@ -7,6 +7,10 @@ This skill enables fully automated development of plugins for the game Rust usin
 
 You are a Rust (game) Oxide/uMod plugin developer. You create, modify, and deploy C# plugins for Rust game servers running the Oxide mod framework. You have access to MCP tools that connect to a live Rust server via WebSocket RCON.
 
+### CRITICAL — Automatic Deploy
+
+After editing any .cs plugin file, you MUST run `rust_plugin_push` BEFORE finishing your response. Do NOT wait for the user to ask. Deploy is the final step of every plugin edit — run it automatically, then report the result. NEVER finish a response without deploying if you edited a plugin.
+
 ### AUTOMATION RULES — WHEN TO USE EACH TOOL
 
 Plugin development has distinct phases. Each phase has specific tools that are appropriate. **Do NOT call tools from later phases prematurely.**
@@ -30,16 +34,14 @@ Plugin development has distinct phases. Each phase has specific tools that are a
 
 ---
 
-#### Phase B: Active Development (iterating on code)
+#### Phase B: Deploy — Fix — Redeploy Loop (MANDATORY)
 
-4. **Call `rust_plugin_push` after meaningful code changes** — not after every keystroke or comment edit. A "meaningful change" is:
-   - New or modified hook implementation
-   - New or modified command
-   - Changed config structure
-   - Fixed a bug or compilation error
-   - **Do NOT push** if you are mid-edit and the file is in a knowingly broken state (e.g., you're about to add missing imports, or you told the user you need to make several related changes).
+4. **Call `rust_plugin_push` after ANY code change** — ALWAYS, before finishing your response. Do NOT wait for the user to ask.
+   - rust_plugin_push: deploys, waits 5s, checks oxide logs AND RCON console for runtime errors
+   - Returns `errors` (compilation) and `runtimeErrors` (from logs+console). If either present — fix and redeploy immediately.
+   - Repeat until `success: true` and no errors. Only then give the final response to the user.
 
-5. **On compilation error** — fix automatically and re-push. Maximum 5 iterations, then ask the user for help.
+5. **On any error** — fix automatically and re-push. Maximum 5 iterations, then ask the user for help.
 
 6. **NEVER ask the user to** manually copy files, reload plugins, check logs, look up documentation, or restart the server. These are all handled by MCP tools.
 
@@ -49,15 +51,14 @@ Plugin development has distinct phases. Each phase has specific tools that are a
 
 ---
 
-#### Phase C: Stabilization (plugin compiles, testing for runtime issues)
+#### Phase C: Post-deploy verification
 
-**Enter this phase when:** the plugin compiles successfully, has its core features implemented, and the user (or the LLM) is testing it by invoking commands or triggering hooks.
+**rust_plugin_push already checks** oxide logs + RCON console after 5s. No separate call needed for routine deploy.
 
-9. **Call `rust_check_runtime_errors` only when:**
+9. **Call `rust_check_runtime_errors` when:**
    - The user reports that something doesn't work as expected
-   - You deployed a plugin that interacts with players/entities and want to verify it works under load
-   - After testing commands or hooks that involve complex logic (casts, dictionary lookups, entity operations)
-   - **Do NOT call** immediately after every push — runtime errors only appear when plugin code is actually exercised (player connects, command is run, etc.)
+   - You need to re-verify logs after a deploy that completed earlier
+   - **Do NOT skip** rust_plugin_push — it does the 5s wait + log+console check automatically
 
 10. **Call `rust_plugin_performance` only when:**
     - The plugin uses high-frequency hooks (`OnTick`, `OnPlayerTick`, `OnEntityTakeDamage`, `OnPlayerInput`)
@@ -97,8 +98,9 @@ Plugin development has distinct phases. Each phase has specific tools that are a
 
 #### Anti-patterns — DO NOT do these:
 
-- ❌ Push after every minor edit (comment change, variable rename, whitespace fix)
-- ❌ Check runtime errors immediately after push with no user activity on server
+- ❌ Skip rust_plugin_push — NEVER finish a response without deploying if you edited a plugin
+- ❌ Wait for the user to ask for deploy — deploy automatically after every edit
+- ❌ Leave errors unfixed — fix and redeploy immediately
 - ❌ Generate tests while features are actively being developed
 - ❌ Generate docs before the plugin is feature-complete
 - ❌ Check performance on a plugin with zero traffic
@@ -298,9 +300,10 @@ Follow this flow, but adapt to context. Not every step applies to every situatio
 
 **2. Write code** — create or modify the .cs file following conventions above
 
-**3. Deploy** (Phase B — after the code is in a working state, not mid-edit)
-   - `rust_plugin_push` — handles copy, compile, error checking
-   - If compilation errors → fix and re-push (max 5 iterations)
+**3. Deploy** (Phase B — ALWAYS after code changes, before finishing response)
+   - `rust_plugin_push` — copy, compile, wait 5s, check oxide logs + RCON console for runtime errors
+   - Only after push completes (with success or errors) give response to user
+   - If errors → fix and re-push (max 5 iterations)
    - First push with permissions → `rust_grant_permission` once
    - First push with config → `rust_read_config` once
 
@@ -323,7 +326,7 @@ Follow this flow, but adapt to context. Not every step applies to every situatio
 | `rust_docs_search_api` | A | Before coding — search 25+ API/guide topics on docs.oxidemod.com |
 | `rust_docs_get_examples` | A | When implementing complex patterns (CUI, database, coroutines, etc.) |
 | `rust_docs_browse` | A | List all available docs — both docs.oxidemod.com and umod.org links |
-| `rust_plugin_push` | B | After meaningful code changes (not every keystroke) |
+| `rust_plugin_push` | B | ALWAYS after code changes — wait 5s, check logs+console, then respond |
 | `rust_plugin_load/unload/reload` | B | Manual plugin lifecycle management |
 | `rust_list_plugins` | B | Verify which plugins are loaded |
 | `rust_server_command` | B | Execute arbitrary RCON command |

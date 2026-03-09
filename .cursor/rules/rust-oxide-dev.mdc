@@ -6,29 +6,32 @@ alwaysApply: false
 
 # Rust Oxide/uMod Plugin Development Rules
 
+## CRITICAL — Automatic Deploy
+
+After editing any .cs plugin file, you MUST run `rust_plugin_push` BEFORE finishing your response. Do NOT wait for the user to ask. Deploy is the final step of every plugin edit — run it automatically, then report the result. NEVER finish a response without deploying if you edited a plugin.
+
 ## Tool Invocation Policy
 
 Each MCP tool has a correct moment. Follow the phase model:
 
-### Phase A: Research (before writing code)
+### Phase A: Research (before writing code) — works WITHOUT RCON
 - BEFORE writing plugin code, search for hooks with `rust_docs_search_hook`
 - BEFORE using any hook, get its exact signature with `rust_docs_get_hook`
 - NEVER guess hook signatures — always verify against live documentation
 - Skip if you already looked up the same hooks earlier in this session
 
-### Phase B: Active Development (iterating on code)
-- Call `rust_plugin_push` after **meaningful** code changes — NOT after every minor edit
-- Meaningful = new/changed hook, command, config structure, bug fix
-- NOT meaningful = comment edit, variable rename, whitespace, mid-edit incomplete state
-- Do NOT ask the user to manually copy, reload, or check anything
-- If compilation fails, fix errors automatically and push again (max 5 attempts)
+### Phase B: Deploy — Fix — Redeploy Loop (MANDATORY)
+- Call `rust_plugin_push` after ANY code change — ALWAYS, before finishing your response
+- rust_plugin_push waits 5s, checks oxide logs AND RCON console for runtime errors
+- If `errors` or `runtimeErrors` in result — fix immediately and redeploy. Repeat until success
 - Grant permissions via `rust_grant_permission` ONLY on first push with new permissions
 - Read config via `rust_read_config` ONLY on first push with config or after config structure change
+- Do NOT ask the user to manually copy, reload, or check anything
 
-### Phase C: Stabilization (testing for runtime issues)
-- Call `rust_check_runtime_errors` ONLY when user tests plugin and reports issues, or after deploying complex logic
-- Call `rust_plugin_performance` ONLY for plugins with heavy hooks (OnTick, OnEntityTakeDamage) or when user reports lag
-- Do NOT call these after every push — they need actual server activity to produce data
+### Phase C: Post-deploy verification
+- rust_plugin_push already checks logs+console after 5s — no separate call needed
+- Call `rust_check_runtime_errors` to re-verify if user reports issues
+- Call `rust_plugin_performance` ONLY for heavy hooks or when user reports lag
 
 ### Phase D: Finalization (plugin is done)
 - Call `rust_generate_tests` ONLY when plugin is feature-stable and user confirms it's ready

@@ -54723,8 +54723,9 @@ var RUNTIME_ERROR_PATTERNS = [
   // Generic Exception
   /(?:Exception|Error):\s*(.+)/
 ];
-var HOOK_PATTERN = /Failed to call hook '(\w+)' on plugin '(\w+)'/;
-var OXIDE_ERROR_PATTERN = /(\w+) threw (\w+Exception):\s*(.+)/;
+var HOOK_PATTERN = /Failed to call hook '(\w+)' on plugin '([\w\s]+?)(?:\s+v[\d.]+)?'/i;
+var OXIDE_ERROR_PATTERN = /(\w+)\s+threw\s+(\w+Exception):\s*(.+)/i;
+var OXIDE_PAREN_PATTERN = /\((\w+Exception):\s*(.+?)\)\s*$/;
 var STACK_LINE_PATTERN = /^\s+at\s+(.+)/;
 var PLUGIN_STACK_PATTERN = /Oxide\.Plugins\.(\w+)\.(\w+)/;
 function parseRuntimeErrors(logContent, filterPlugin) {
@@ -54738,11 +54739,13 @@ function parseRuntimeErrors(logContent, filterPlugin) {
       if (currentError?.errorType) {
         errors2.push(currentError);
       }
+      const pluginName = hookMatch[2].trim().split(/\s+/)[0];
+      const parenMatch = line.match(OXIDE_PAREN_PATTERN);
       currentError = {
         hookName: hookMatch[1],
-        pluginName: hookMatch[2],
-        errorType: "",
-        message: "",
+        pluginName,
+        errorType: parenMatch ? parenMatch[1] : "",
+        message: parenMatch ? parenMatch[2].trim() : "",
         stackTrace: []
       };
       continue;
@@ -54908,31 +54911,90 @@ function suggestFix(error2) {
   }
   return suggestions.join("\n");
 }
-async function readLogsAndParseErrors(filterPlugin, lines = 250) {
-  let logContent = "";
-  const serverPath = process.env.RUST_SERVER_PATH;
-  if (serverPath) {
+async function readFileTail(filePath, lines) {
+  const content = await fs2.readFile(filePath, "utf-8");
+  const allLines = content.split("\n");
+  return allLines.slice(-lines).join("\n");
+}
+async function readLogContent(serverPath, lines) {
+  const parts = [];
+  const candidates = [
+    path2.join(serverPath, "oxide", "logs"),
+    path2.join(serverPath, "logs"),
+    path2.join(serverPath, "server"),
+    serverPath
+  ];
+  const seen = /* @__PURE__ */ new Set();
+  for (const logsDir of candidates) {
     try {
-      const logsDir = path2.join(serverPath, "oxide", "logs");
+      const stat = await fs2.stat(logsDir);
+      if (!stat.isDirectory()) continue;
       const files = await fs2.readdir(logsDir);
       const logFiles = files.filter((f) => f.endsWith(".txt") || f.endsWith(".log")).sort().reverse();
-      if (logFiles.length > 0) {
-        const latestLog = path2.join(logsDir, logFiles[0]);
-        const content = await fs2.readFile(latestLog, "utf-8");
-        const allLines = content.split("\n");
-        logContent = allLines.slice(-lines).join("\n");
+      for (const f of logFiles.slice(0, 3)) {
+        const logPath = path2.join(logsDir, f);
+        if (seen.has(logPath)) continue;
+        seen.add(logPath);
+        try {
+          const tail = await readFileTail(logPath, lines);
+          if (tail.length > 10) parts.push(`[${path2.basename(logPath)}]
+${tail}`);
+        } catch {
+        }
       }
     } catch {
     }
   }
-  if (!logContent) {
-    try {
-      const rcon = getRconClient();
-      await rcon.connect();
-      logContent = await rcon.send("oxide.show errors");
-    } catch {
+  return parts.join("\n\n");
+}
+async function findLogsInDir(dir, lines, depth = 0) {
+  if (depth > 2) return "";
+  try {
+    const entries = await fs2.readdir(dir, { withFileTypes: true });
+    const logFiles = entries.filter((e) => e.isFile() && (e.name.endsWith(".txt") || e.name.endsWith(".log"))).map((e) => ({ name: e.name, filePath: path2.join(dir, e.name) })).sort((a, b) => b.name.localeCompare(a.name));
+    for (const { filePath: logPath } of logFiles.slice(0, 2)) {
+      const content = await fs2.readFile(logPath, "utf-8");
+      const tail = content.split("\n").slice(-lines).join("\n");
+      if (tail.length > 10) return tail;
     }
+    for (const e of entries.filter((x) => x.isDirectory())) {
+      const found = await findLogsInDir(path2.join(dir, e.name), lines, depth + 1);
+      if (found) return found;
+    }
+  } catch {
   }
+  return "";
+}
+var RCON_LOG_COMMANDS = [
+  "oxide.show errors",
+  "oxide.show logs",
+  "serverlog",
+  "log"
+];
+async function readLogsAndParseErrors(filterPlugin, lines = 500) {
+  const parts = [];
+  const serverPath = process.env.RUST_SERVER_PATH;
+  if (serverPath) {
+    let fsContent = await readLogContent(serverPath, lines);
+    if (!fsContent) {
+      fsContent = await findLogsInDir(path2.join(serverPath, "server"), lines);
+    }
+    if (fsContent) parts.push(fsContent);
+  }
+  try {
+    const rcon = getRconClient();
+    await rcon.connect();
+    for (const cmd of RCON_LOG_COMMANDS) {
+      try {
+        const output = await rcon.send(cmd);
+        if (output?.trim()) parts.push(`[RCON: ${cmd}]
+${output}`);
+      } catch {
+      }
+    }
+  } catch {
+  }
+  const logContent = parts.join("\n\n");
   return parseRuntimeErrors(logContent, filterPlugin);
 }
 function registerRuntimeErrorTools(server) {
@@ -54941,46 +55003,11 @@ function registerRuntimeErrorTools(server) {
     "Parse runtime errors from Oxide logs with fix suggestions. Works without RCON if RUST_SERVER_PATH is set (reads local logs). ALWAYS run after successful rust_plugin_push when RCON is available. Also use when user reports issues.",
     {
       plugin_name: external_exports.string().optional().describe("Filter errors by plugin name"),
-      lines: external_exports.number().optional().default(200).describe("Number of recent log lines to scan (default 200)"),
+      lines: external_exports.number().optional().default(500).describe("Number of recent log lines to scan (default 500)"),
       include_suggestions: external_exports.boolean().optional().default(true).describe("Include fix suggestions for each error (default true)")
     },
     async ({ plugin_name, lines, include_suggestions }) => {
-      let logContent = "";
-      const serverPath = process.env.RUST_SERVER_PATH;
-      if (serverPath) {
-        try {
-          const logsDir = path2.join(serverPath, "oxide", "logs");
-          const files = await fs2.readdir(logsDir);
-          const logFiles = files.filter((f) => f.endsWith(".txt") || f.endsWith(".log")).sort().reverse();
-          if (logFiles.length > 0) {
-            const latestLog = path2.join(logsDir, logFiles[0]);
-            const content = await fs2.readFile(latestLog, "utf-8");
-            const allLines = content.split("\n");
-            logContent = allLines.slice(-lines).join("\n");
-          }
-        } catch {
-        }
-      }
-      if (!logContent) {
-        try {
-          const rcon = getRconClient();
-          await rcon.connect();
-          const output = await rcon.send("oxide.show errors");
-          logContent = output;
-        } catch {
-        }
-      }
-      if (!logContent) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "No log content available. Ensure RUST_SERVER_PATH is set or RCON is connected."
-            }
-          ]
-        };
-      }
-      const errors2 = parseRuntimeErrors(logContent, plugin_name);
+      const errors2 = await readLogsAndParseErrors(plugin_name, lines);
       if (errors2.length === 0) {
         const msg = plugin_name ? `No runtime errors found for plugin "${plugin_name}" in the last ${lines} log lines.` : `No runtime errors found in the last ${lines} log lines.`;
         return {
@@ -55011,7 +55038,7 @@ function registerRuntimeErrorTools(server) {
 // src/tools/plugin-push.ts
 import fs3 from "fs/promises";
 import path3 from "path";
-var RUNTIME_CHECK_DELAY_MS = parseInt(process.env.RUST_RUNTIME_CHECK_DELAY_MS || "10000", 10) || 1e4;
+var RUNTIME_CHECK_DELAY_MS = parseInt(process.env.RUST_RUNTIME_CHECK_DELAY_MS || "5000", 10) || 5e3;
 function extractPluginMeta(content) {
   const match = content.match(
     /\[Info\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)\]/
@@ -55077,7 +55104,7 @@ function sleep(ms) {
 function registerPluginPushTool(server) {
   server.tool(
     "rust_plugin_push",
-    "Deploy a .cs plugin to Rust server: validate \u2192 copy \u2192 (when RCON) o.reload \u2192 verify load \u2192 wait 10s \u2192 check logs for runtime errors. Works without RCON (file copied, rconUnavailable). ALWAYS use after code changes. Returns errors + runtimeErrors \u2014 fix and redeploy until success.",
+    "Deploy a .cs plugin to Rust server: validate \u2192 copy \u2192 (when RCON) o.reload \u2192 verify load \u2192 wait 5s \u2192 check oxide logs AND RCON console for runtime errors. Only after this check respond to user. Works without RCON (file copied, rconUnavailable). ALWAYS use after code changes. Returns errors + runtimeErrors \u2014 fix and redeploy until success.",
     {
       file_path: external_exports.string().describe("Absolute path to the .cs plugin file in workspace")
     },
@@ -55164,7 +55191,7 @@ function registerPluginPushTool(server) {
           result.pluginInfo = { name: meta.name, version: meta.version, author: meta.author };
           result.steps.push(`\u23F3 Waiting ${RUNTIME_CHECK_DELAY_MS / 1e3}s for runtime verification...`);
           await sleep(RUNTIME_CHECK_DELAY_MS);
-          const runtimeErrors = await readLogsAndParseErrors(meta.name, 250);
+          const runtimeErrors = await readLogsAndParseErrors(meta.name, 500);
           if (runtimeErrors.length > 0) {
             result.runtimeErrors = runtimeErrors;
             result.success = false;
@@ -55215,7 +55242,7 @@ function registerPluginPushTool(server) {
           };
           result.steps.push(`\u23F3 Waiting ${RUNTIME_CHECK_DELAY_MS / 1e3}s for runtime verification...`);
           await sleep(RUNTIME_CHECK_DELAY_MS);
-          const runtimeErrors = await readLogsAndParseErrors(meta.name, 250);
+          const runtimeErrors = await readLogsAndParseErrors(meta.name, 500);
           if (runtimeErrors.length > 0) {
             result.runtimeErrors = runtimeErrors;
             result.success = false;
@@ -74896,17 +74923,17 @@ You have access to MCP tools for automated plugin development. Each tool has a c
 - \`rust_docs_get_examples\` \u2014 reference implementations for complex patterns (CUI, WebRequest).
 - Documentation search and plugin development work even when RCON is disconnected.
 
-### Phase B: Deploy \u2014 Fix \u2014 Redeploy Loop (MANDATORY after code changes)
-After **any** change to plugin code:
-1. **Deploy**: \`rust_plugin_push\` \u2014 ALWAYS run after saving changes. Waits 10s after load, then checks logs for runtime errors.
-2. **Check**: rust_plugin_push returns \`errors\` (compilation) and \`runtimeErrors\` (from logs after 10s). If either present \u2014 fix immediately.
-3. **Redeploy**: Run \`rust_plugin_push\` again. Repeat until \`success: true\` and no errors.
+### Phase B: Deploy \u2014 Fix \u2014 Redeploy Loop (MANDATORY)
+**CRITICAL \u2014 AUTOMATIC DEPLOY**: After editing any .cs plugin file, you MUST run \`rust_plugin_push\` BEFORE finishing your response. Do NOT wait for the user to ask. Deploy is the final step of every plugin edit \u2014 run it automatically, then report the result.
+1. **Deploy**: \`rust_plugin_push\` \u2014 ALWAYS run after saving changes. Waits 5s, checks oxide logs AND RCON console. Only after this check give the response to the user.
+2. **Check**: Returns \`errors\` (compilation) and \`runtimeErrors\` (from server logs). If either present \u2014 fix immediately and redeploy.
+3. **Redeploy**: Repeat until \`success: true\` and no errors.
 - \`rust_grant_permission\` \u2014 ONLY on first push with new permissions.
-- \`rust_read_config\` \u2014 ONLY on first push with config or after config structure change.
+- \`rust_read_config\` \u2014 ONLY on first push with config.
 - \`rust_plugin_load/unload/reload\` \u2014 manual lifecycle when needed (requires RCON).
 
-### Phase C: Post-deploy verification (when RCON available)
-- \`rust_check_runtime_errors\` \u2014 ALWAYS run after successful deploy (when RCON is up) to verify no runtime errors in logs.
+### Phase C: Post-deploy verification
+- \`rust_check_runtime_errors\` \u2014 run after deploy to verify no runtime errors in oxide logs.
 - \`rust_plugin_performance\` \u2014 ONLY for plugins with heavy hooks or when user reports lag.
 
 ### Phase D: Finalization (plugin is feature-complete)
@@ -74914,8 +74941,8 @@ After **any** change to plugin code:
 - \`rust_generate_docs\` \u2014 ONLY when user says plugin is done. NOT during active development.
 
 ### Anti-patterns \u2014 DO NOT:
-- Skip rust_plugin_push after code changes
-- Leave compilation errors unfixed \u2014 fix and redeploy immediately
+- Skip rust_plugin_push \u2014 NEVER finish a response without deploying if you edited a plugin
+- Leave errors unfixed \u2014 fix and redeploy immediately
 - Generate tests/docs while features are still being added
 - Start file watcher without user asking for it
 
