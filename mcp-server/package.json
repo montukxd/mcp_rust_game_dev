@@ -1,6 +1,6 @@
 {
   "name": "rust-oxide-mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "MCP server for Rust/uMod (Oxide) plugin development with hot-reload via WebSocket RCON",
   "type": "module",
   "main": "dist/index.mjs",

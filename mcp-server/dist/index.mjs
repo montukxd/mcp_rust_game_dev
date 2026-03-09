@@ -55318,9 +55318,13 @@ async function rateLimitedWait() {
 }
 async function fetchPage(urlPath) {
   const fullUrl = urlPath.startsWith("http") ? urlPath : `${OXIDEMOD_BASE}${urlPath}`;
-  return fetchWithRetries(fullUrl);
+  return fetchWithRetries(fullUrl, 15e3);
 }
-async function fetchWithRetries(fullUrl) {
+async function fetchExternalUrl(fullUrl, timeoutMs = 15e3) {
+  const t = fullUrl.includes("umod.org") ? 25e3 : timeoutMs;
+  return fetchWithRetries(fullUrl, t);
+}
+async function fetchWithRetries(fullUrl, timeoutMs = 15e3) {
   let lastError = null;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     await rateLimitedWait();
@@ -55330,7 +55334,7 @@ async function fetchWithRetries(fullUrl) {
           "User-Agent": "RustOxideMCP/1.0",
           Accept: "text/html,application/xhtml+xml"
         },
-        signal: AbortSignal.timeout(15e3)
+        signal: AbortSignal.timeout(timeoutMs)
       });
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -69917,6 +69921,81 @@ function parseHooksIndexFull(html3) {
   });
   return result;
 }
+function parseWikiPage(html3, url) {
+  const $2 = load(html3);
+  $2("nav, .sidebar, #toolbar, .body-tabs, .footer, script, style, .image, img").remove();
+  const title = $2("#pagetitle").first().text().trim() || $2("h1.pagetitle").first().text().trim() || $2("h1").first().text().trim() || "Wiki Page";
+  const md = $2(".markdown, #pagecontent").first();
+  const parts = [];
+  const codeBlocks = [];
+  md.find("h1, h2, h3, h4, p, li, pre").each((_, el) => {
+    const tag = (el.name ?? $2(el).prop("tagName") ?? "").toString().toLowerCase();
+    if (tag === "pre") {
+      const code = $2(el).find("code").text().trim() || $2(el).text().trim();
+      if (code.length > 5) {
+        codeBlocks.push(code);
+        parts.push(`
+\`\`\`csharp
+${code}
+\`\`\``);
+      }
+      return;
+    }
+    const t = $2(el).clone().children("a.anchor, i").remove().end().text().trim();
+    if (!t) return;
+    if (tag === "h1") parts.push("\n## " + t);
+    else if (tag === "h2") parts.push("\n### " + t);
+    else if (tag === "h3") parts.push("\n#### " + t);
+    else if (tag === "li") parts.push("- " + t);
+    else parts.push(t);
+  });
+  const content = parts.join("\n").trim().substring(0, 12e3);
+  return { title, url, content, codeBlocks };
+}
+function parseUmodPage(html3, url) {
+  const $2 = load(html3);
+  const title = $2("title").first().text().trim() || $2("h1").first().text().trim() || "uMod Documentation";
+  $2("script, style, nav, header, footer, .sidebar").remove();
+  const contentRoot = $2("main, article, .content, [role='main']").first();
+  const scope = contentRoot.length ? contentRoot : $2("body");
+  const parts = [];
+  scope.find("h1, h2, h3, h4, p, li, pre").each((_, el) => {
+    const tag = (el.name ?? $2(el).prop("tagName") ?? "").toString().toLowerCase();
+    if (tag === "pre") {
+      const code = $2(el).find("code").text().trim() || $2(el).text().trim();
+      if (code.length > 10) parts.push(`
+\`\`\`
+${code}
+\`\`\``);
+      return;
+    }
+    const t = $2(el).text().trim();
+    if (!t) return;
+    if (tag === "h1") parts.push("\n## " + t);
+    else if (tag === "h2") parts.push("\n### " + t);
+    else if (tag === "h3") parts.push("\n#### " + t);
+    else if (tag === "li") parts.push("- " + t);
+    else parts.push(t);
+  });
+  const content = parts.join("\n").trim().substring(0, 12e3);
+  const codeBlocks = scope.find("pre code").map((_, el) => $2(el).text().trim()).get().filter((c) => c.length > 10);
+  return { title, url, content: content || "uMod is a SPA \u2014 content loads via JavaScript. Open in browser.", codeBlocks };
+}
+function parseGuidesIndexFull(html3) {
+  const $2 = load(html3);
+  const seen = /* @__PURE__ */ new Set();
+  const result = [];
+  $2("a[href*='/guides/']").each((_, el) => {
+    const href = $2(el).attr("href") || "";
+    const path11 = href.replace(/^https?:\/\/[^/]+/, "").replace(/#.*$/, "").replace(/\/$/, "").trim();
+    const title = $2(el).text().trim();
+    if (path11.startsWith("/guides/") && path11 !== "/guides" && path11 !== "/guides/" && title && !seen.has(path11)) {
+      seen.add(path11);
+      result.push({ path: path11, title });
+    }
+  });
+  return result;
+}
 
 // src/docs/cache.ts
 import fs5 from "fs/promises";
@@ -70179,21 +70258,28 @@ var HOOKS_INDEX = [
   // === Fuel (7) ===
   { name: "CanCheckFuel", category: "fuel", signature: "object CanCheckFuel(EntityFuelSystem fuelSystem)" },
   { name: "OnFuelConsume", category: "fuel", signature: "object OnFuelConsume(BaseOven oven, Item fuel, ItemModBurnable burnable)" },
-  // === Phone (10) ===
-  { name: "CanReceiveCall", category: "phone", signature: "object CanReceiveCall(PhoneController receiver, PhoneController caller)" },
-  { name: "OnPhoneCallStart", category: "phone", signature: "void OnPhoneCallStart(PhoneController caller, PhoneController receiver)" },
-  { name: "OnPhoneCallEnd", category: "phone", signature: "void OnPhoneCallEnd(PhoneController controller)" },
-  { name: "OnPhoneDial", category: "phone", signature: "object OnPhoneDial(PhoneController controller, BasePlayer player, int number)" },
+  // === Phone (10) — signatures from docs.oxidemod.com ===
+  { name: "CanReceiveCall", category: "phone", signature: "bool? CanReceiveCall(PhoneController instance)" },
+  { name: "OnPhoneAnswer", category: "phone", signature: "object OnPhoneAnswer(PhoneController instance, PhoneController activeCallTo)" },
+  { name: "OnPhoneAnswered", category: "phone", signature: "void OnPhoneAnswered(PhoneController instance, PhoneController activeCallTo)" },
+  { name: "OnPhoneCallStart", category: "phone", signature: "object OnPhoneCallStart(PhoneController instance, PhoneController activeCallTo, BasePlayer currentPlayer)" },
+  { name: "OnPhoneCallStarted", category: "phone", signature: "void OnPhoneCallStarted(PhoneController instance, PhoneController activeCallTo, BasePlayer currentPlayer)" },
+  { name: "OnPhoneDial", category: "phone", signature: "object OnPhoneDial(PhoneController instance, PhoneController telephone, BasePlayer currentPlayer)" },
+  { name: "OnPhoneDialFail", category: "phone", signature: "object OnPhoneDialFail(PhoneController instance, DialFailReason reason, BasePlayer currentPlayer)" },
+  { name: "OnPhoneDialFailed", category: "phone", signature: "void OnPhoneDialFailed(PhoneController instance, DialFailReason reason, BasePlayer currentPlayer)" },
+  { name: "OnPhoneDialTimeout", category: "phone", signature: "object OnPhoneDialTimeout(PhoneController activeCallTo, PhoneController instance, BasePlayer currentPlayer)" },
+  { name: "OnPhoneDialTimedOut", category: "phone", signature: "void OnPhoneDialTimedOut(PhoneController activeCallTo, PhoneController instance, BasePlayer currentPlayer)" },
   // === Fishing (6) ===
   { name: "CanCastFishingRod", category: "fishing", signature: "object CanCastFishingRod(FishingRod rod, BasePlayer player)" },
   { name: "OnFishCatch", category: "fishing", signature: "object OnFishCatch(BasePlayer player, Item item)" },
   // === Network (5) ===
   { name: "CanNetworkTo", category: "network", signature: "object CanNetworkTo(BaseNetworkable entity, BasePlayer target)" },
-  // === Traps (5) ===
+  // === Traps (6) ===
   { name: "OnTrapArm", category: "traps", signature: "object OnTrapArm(BearTrap trap, BasePlayer player)" },
   { name: "OnTrapDisarm", category: "traps", signature: "object OnTrapDisarm(BearTrap trap, BasePlayer player)" },
   { name: "OnTrapSnapped", category: "traps", signature: "void OnTrapSnapped(BaseTrap trap, GameObject go)" },
   { name: "OnTrapTrigger", category: "traps", signature: "object OnTrapTrigger(BaseTrap trap, GameObject go)" },
+  { name: "OnWildlifeTrap", category: "traps", signature: "object OnWildlifeTrap(WildlifeTrap instance, TrappableWildlife trapped)" },
   // === World (3) ===
   { name: "OnTerrainCreate", category: "world", signature: "void OnTerrainCreate(TerrainConfig config)" },
   // === Clan (7) ===
@@ -70230,6 +70316,1320 @@ var HOOKS_INDEX = [
   // === Pet (2) ===
   { name: "OnFrankensteinPetSleep", category: "pet", signature: "object OnFrankensteinPetSleep(FrankensteinPet pet)" }
 ];
+
+// src/resources/wiki-pages.ts
+var WIKI_BASE = "https://wiki.facepunch.com/rust";
+var WIKI_PAGES = [
+  // Playing — Getting Started & General
+  { title: "Buying and Installing Rust", address: "Purchase-and-Installation", tags: ["buy", "install", "purchase"] },
+  { title: "Chat", address: "global_text_chat", tags: ["chat", "text"] },
+  { title: "Keybinds", address: "Keybinds", tags: ["keybind", "key", "control"] },
+  { title: "Teams", address: "Teams", tags: ["team", "group"] },
+  { title: "Tool Cupboard, decay and building privilege", address: "the_tool_cupboard", tags: ["cupboard", "tc", "decay", "building", "privilege"] },
+  { title: "Useful Console Commands", address: "useful_commands", tags: ["command", "console", "f1", "rcon"] },
+  // The World
+  { title: "Animals", address: "Animals", tags: ["animal", "bear", "wolf", "deer", "boar"] },
+  { title: "Building-terminology", address: "Building-terminology", tags: ["building", "airlock", "honeycomb", "footprint"] },
+  { title: "Farming Basics", address: "Farming_Basics", tags: ["farming", "farm", "planter", "crop"] },
+  { title: "Farming", address: "Farming", tags: ["farming", "farm"] },
+  { title: "Fishing", address: "Fishing", tags: ["fish", "fishing"] },
+  { title: "Ore Nodes", address: "Ore_nodes", tags: ["ore", "node", "mining", "sulfur", "metal"] },
+  { title: "Outpost", address: "Outpost", tags: ["outpost", "safe", "zone"] },
+  { title: "Recycler", address: "Recycler", tags: ["recycler", "recycle"] },
+  { title: "Safe Zone Recycler", address: "Safe_Zone_Recycler", tags: ["safe", "zone", "recycler"] },
+  { title: "The Map", address: "map", tags: ["map", "world"] },
+  // Server Hosting
+  { title: "Adding custom radios to Boombox", address: "adding-custom-radios-to-boombox", tags: ["radio", "boombox", "custom"] },
+  { title: "Centralized Banning", address: "centralized-banning", tags: ["ban", "centralized"] },
+  { title: "Creating a hidden, whitelisted server", address: "Creating_a_hidden_whitelisted_server", tags: ["whitelist", "hidden", "server"] },
+  { title: "Creating a server", address: "Creating-a-server", tags: ["server", "create", "hosting"] },
+  { title: "Creative Mode", address: "creative", tags: ["creative", "mode"] },
+  { title: "Custom Server Icon", address: "custom-server-icon", tags: ["icon", "server"] },
+  { title: "Getting started with your rust server", address: "Getting-Started_w-Server", tags: ["server", "getting started"] },
+  { title: "Hosting Custom Maps", address: "Hosting_a_custom_map", tags: ["hosting", "map", "custom"] },
+  { title: "Procedural Generation Customization", address: "procedural_generation_customization", tags: ["procedural", "map", "generation"] },
+  { title: "Receiving player reports", address: "receiving-reports", tags: ["report", "player"] },
+  { title: "Rust+ Server", address: "rust-companion-server", tags: ["rust+", "companion", "app"] },
+  { title: "Server Browser Tags", address: "server-browser-tags", tags: ["server", "browser", "tags"] },
+  { title: "Server Custom Emojis", address: "server-custom-emojis", tags: ["emoji", "server"] },
+  { title: "Server DNS Records", address: "dns-records", tags: ["dns", "server"] },
+  { title: "Server Gamemodes", address: "server-gamemodes", tags: ["gamemode", "server"] },
+  { title: "Server Wipe Timer", address: "server-wipe-timer", tags: ["wipe", "timer", "server"] },
+  { title: "Setting up a discord bot for your Rust server", address: "Creating_a_player_count_display_discord_bot", tags: ["discord", "bot", "server"] },
+  { title: "Tutorial Island", address: "tutorial_island", tags: ["tutorial", "island"] },
+  // Other Topics
+  { title: "Graffiti Pack", address: "graffiti-pack", tags: ["graffiti"] },
+  { title: "Instruments", address: "Instruments", tags: ["instrument", "music"] },
+  { title: "Sunburn", address: "sunburn", tags: ["sunburn"] },
+  { title: "Twitch Drops", address: "twitch-drops", tags: ["twitch", "drops"] },
+  { title: "Weather", address: "Weather", tags: ["weather", "rain"] },
+  // Developers — World Design
+  { title: "Custom Maps", address: "Custom_Maps", tags: ["map", "custom"] },
+  { title: "FAQ and Troubleshooting", address: "FAQ_and_Troubleshooting", tags: ["faq", "troubleshoot"] },
+  { title: "Map Data", address: "Map_Data", tags: ["map", "data"] },
+  { title: "Map Editors", address: "Map_Editors", tags: ["map", "editor"] },
+  { title: "Terrain", address: "Terrain", tags: ["terrain"] },
+  { title: "Topology", address: "Topology", tags: ["topology"] },
+  { title: "Utility Prefabs", address: "Utility_Prefabs", tags: ["utility", "prefab"] },
+  { title: "Volume Prefabs", address: "Volume_Prefabs", tags: ["volume", "prefab"] },
+  // Skinning
+  { title: "Creating Transparent PNGs", address: "Transparent_Pngs", tags: ["skin", "png", "transparent"] },
+  // Workshop
+  { title: "Getting Your Skin Accepted", address: "Getting_Skin_Accepted", tags: ["skin", "workshop"] },
+  { title: "Workshop FAQ", address: "Workshop_FAQ", tags: ["workshop", "faq"] },
+  // Cinematic Tools
+  { title: "Cinematic Animations", address: "Cinematic_Animations", tags: ["cinematic", "animation"] },
+  { title: "CopyPaste", address: "CopyPaste", tags: ["copypaste", "copy", "paste"] },
+  { title: "Debug Camera", address: "Debug_Camera", tags: ["debug", "camera"] },
+  { title: "Demos", address: "Demos", tags: ["demo"] },
+  { title: "Depth Of Field", address: "Depth_Of_Field", tags: ["depth", "field"] },
+  { title: "MIDI Binding", address: "MIDI_Binding", tags: ["midi", "binding"] },
+  { title: "Other Commands", address: "Other_Cinematic_Commands", tags: ["cinematic", "command"] },
+  { title: "Overview", address: "Cinematic_Tools", tags: ["cinematic", "overview"] },
+  { title: "Prefabs & Entities", address: "Cinematic_Prefabs", tags: ["prefab", "entity", "cinematic"] },
+  // Modding
+  { title: "Carbon Modding Framework", address: "Carbon", tags: ["carbon", "modding"] },
+  { title: "Coroutines", address: "Coroutines", tags: ["coroutine", "yield", "async"] },
+  { title: "CSharp Basics", address: "CSharp_Basics", tags: ["csharp", "c#", "basics"] },
+  { title: "CSharp Formatting", address: "CSharp_Formatting", tags: ["csharp", "formatting"] },
+  { title: "Entities", address: "Entities", tags: ["entity", "prefab", "spawn"] },
+  { title: "Hooks", address: "Hooks", tags: ["hook", "oxide", "callback"] },
+  { title: "Item Mods", address: "Item_Mods", tags: ["item", "mod"] },
+  { title: "Items Overview", address: "Items_Overview", tags: ["items", "overview"] },
+  { title: "Modding", address: "modding", tags: ["modding", "mod"] },
+  { title: "Modding Overview", address: "Modding_Overview", tags: ["modding", "overview"] },
+  { title: "Modding Tools", address: "Modding_Tools", tags: ["modding", "tools", "ilspy"] },
+  { title: "Oxide", address: "Oxide", tags: ["oxide", "umod", "plugin"] },
+  { title: "Profiler", address: "Profiler", tags: ["profiler"] },
+  { title: "Protobuf", address: "Protobuf", tags: ["protobuf", "network"] }
+];
+var ITEM_ADDRESS_OVERRIDES = {
+  "8x Zoom Scope": "item/weapon.mod.8x.scope",
+  "Variable Zoom Scope": "item/weapon.mod.small.scope",
+  "Holosight": "item/weapon.mod.holosight",
+  "Weapon Lasersight": "item/weapon.mod.lasersight",
+  "Weapon flashlight": "item/weapon.mod.flashlight",
+  "Muzzle Boost": "item/weapon.mod.muzzleboost",
+  "Muzzle Brake": "item/weapon.mod.muzzlebrake",
+  "Military Silencer": "item/weapon.mod.silencer",
+  "Oil Filter Silencer": "item/weapon.mod.oilfiltersilencer",
+  "Soda Can Silencer": "item/weapon.mod.sodacansilencer",
+  "Simple Handmade Sight": "item/weapon.mod.simplesight",
+  "Extended Magazine": "item/weapon.mod.extendedmags",
+  "Targeting Attachment": "item/weapon.mod.targetingattachment",
+  "Gas Compression Overdrive": "item/weapon.mod.gascompressionovedrive",
+  "High External Wooden Gate": "item/gates.external.high.wood",
+  "High External Wooden Wall": "item/wall.external.high",
+  "High Ice Wall": "item/wall.external.high.ice",
+  "Short Ice Wall": "item/wall.ice.wall",
+  "Floor grill": "item/floor.grill",
+  "Floor triangle grill": "item/floor.triangle.grill",
+  "Triangle Ladder Hatch": "item/floor.triangle.ladder.hatch",
+  "Ladder Hatch": "item/floor.ladder.hatch",
+  "Reinforced Glass Window": "item/wall.window.glass.reinforced",
+  "Strengthened Glass Window": "item/wall.window.bars.toptier",
+  "Metal horizontal embrasure": "item/shutter.metal.embrasure.a",
+  "Metal Vertical embrasure": "item/shutter.metal.embrasure.b",
+  "Metal Window Bars": "item/wall.window.bars.metal",
+  "Wooden Window Bars": "item/wall.window.bars.wood",
+  "Metal Shop Front": "item/wall.frame.shopfront.metal",
+  "Shop Front": "item/wall.frame.shopfront",
+  "Chainlink Fence": "item/wall.frame.fence",
+  "Chainlink Fence Gate": "item/wall.frame.fence.gate",
+  "Prison Cell Gate": "item/wall.frame.cell.gate",
+  "Prison Cell Wall": "item/wall.frame.cell",
+  "Garage Door": "item/wall.frame.garagedoor",
+  "Wood Double Door": "item/door.double.hinged.wood",
+  "Armored Door": "item/door.hinged.toptier",
+  "Armored Double Door": "item/door.double.hinged.toptier",
+  "Wooden Door": "item/door.hinged.wood",
+  "Wood Shutters": "item/shutter.wood.a",
+  "Wooden Frontier Bar Doors": "item/door.double.hinged.bardoors",
+  "Wooden Ladder": "item/ladder.wooden.wall",
+  "Large Water Catcher": "item/water.catcher.large",
+  "Small Water Catcher": "item/water.catcher.small",
+  "Abyss Horizontal Storage Tank": "item/abyss.barrel.horizontal",
+  "Abyss Vertical Storage Tank": "item/abyss.barrel.vertical",
+  "Storage Barrel Horizontal": "item/storage_barrel_b",
+  "Storage Barrel Vertical": "item/storage_barrel_c",
+  "Hide Halterneck": "item/attire.hide.helterneck",
+  "Reindeer Antlers": "item/attire.reindeer.headband",
+  "Double Diving Tank": "item/diving.tank.double",
+  "Heavy Frankenstein Head": "item/frankensteins.monster.01.head",
+  "Heavy Frankenstein Legs": "item/frankensteins.monster.01.legs",
+  "Heavy Frankenstein Torso": "item/frankensteins.monster.01.torso",
+  "Medium Frankenstein Head": "item/frankensteins.monster.02.head",
+  "Medium Frankenstein Legs": "item/frankensteins.monster.02.legs",
+  "Medium Frankenstein Torso": "item/frankensteins.monster.02.torso",
+  "Light Frankenstein Head": "item/frankensteins.monster.03.head",
+  "Light Frankenstein Legs": "item/frankensteins.monster.03.legs",
+  "Light Frankenstein Torso": "item/frankensteins.monster.03.torso",
+  "Heavy Scientist Suit": "item/scientistsuit_heavy",
+  "NVGM Scientist Suit": "item/hazmatsuit_scientist_nvgm",
+  "Outbreak Scientist Suit": "item/oubreak_scientist",
+  "Naval Scientist Suit": "item/hazmatsuit_scientist_naval",
+  "Arctic Scientist Suit": "item/hazmatsuit_scientist_arctic",
+  "Scientist Suit": "item/hazmatsuit_scientist_peacekeeper",
+  "Chinese Lantern White": "item/chineselanternwhite",
+  "Landscape Photo Frame": "item/photoframe.landscape",
+  "Portrait Photo Frame": "item/photoframe.portrait",
+  "Landscape Picture Frame": "item/sign.pictureframe.landscape",
+  "Portrait Picture Frame": "item/sign.pictureframe.portrait",
+  "Tall Picture Frame": "item/sign.pictureframe.tall",
+  "XL Picture Frame": "item/sign.pictureframe.xl",
+  "XXL Picture Frame": "item/sign.pictureframe.xxl",
+  "Ornate Frame large": "item/goldframe.large",
+  "Ornate Frame Small": "item/goldframe.small",
+  "Ornate Frame Standing": "item/goldframe.standing",
+  "Ornate Frame XL": "item/goldframe.xl",
+  "Ornate Frame XXL": "item/goldframe.xxl",
+  "Shutter Frame large": "item/scrapframe.large",
+  "Shutter Frame Small": "item/scrapframe.small",
+  "Shutter Frame Standing": "item/scrapframe.standing",
+  "Shutter Frame XL": "item/scrapframe.xl",
+  "Shutter Frame XXL": "item/scrapframe.xxl",
+  "Light-Up Frame Large": "item/lightup.large",
+  "Light-Up Frame Small": "item/lightupframe.small",
+  "Light-Up Frame Standing": "item/lightupframe.standing",
+  "Light-Up Frame XL": "item/lightup.xl",
+  "Light-Up Frame XXL": "item/lightup.xxl",
+  "Artist Canvas Large": "item/sign.artistcanvas.l",
+  "Artist Canvas Small": "item/sign.artistcanvas.xs",
+  "Artist Canvas Standing": "item/sign.artistcanvas.m",
+  "Artist Canvas XL": "item/sign.artistcanvas.xl",
+  "Artist Canvas XXL": "item/sign.artistcanvas.xxl",
+  "Large Banner Hanging": "item/sign.hanging.banner.large",
+  "Large Banner on pole": "item/sign.pole.banner.large",
+  "Two Sided Hanging Sign": "item/sign.hanging",
+  "Two Sided Ornate Hanging Sign": "item/sign.hanging.ornate",
+  "One Sided Town Sign Post": "item/sign.post.town",
+  "Two Sided Town Sign Post": "item/sign.post.town.roof",
+  "Single Sign Post": "item/sign.post.single",
+  "Double Sign Post": "item/sign.post.double",
+  "Frontier Bolts Single Item Rack": "item/gunrack.single.1.horizontal",
+  "Frontier Horns Single Item Rack": "item/gunrack.single.2.horizontal",
+  "Frontier Horseshoe Single Item Rack": "item/gunrack.single.3.horizontal",
+  "Horizontal Weapon Rack": "item/gunrack.horizontal",
+  "Tall Weapon Rack": "item/gunrack_tall.horizontal",
+  "Wide Weapon Rack": "item/gunrack_wide.horizontal",
+  "Weapon Rack Stand": "item/gunrack_stand",
+  "Large Hunting Trophy": "item/huntingtrophylarge",
+  "Small Hunting Trophy": "item/huntingtrophysmall",
+  "Bear Skin Rug": "item/rug.bear",
+  "Small Stash": "item/stash.small",
+  "Wood Storage Box": "item/box.wooden",
+  "Large Furnace": "item/furnace.large",
+  "Small Oil Refinery": "item/small.oil.refinery",
+  "Small Ramp": "item/small_ramp",
+  "Small Boat Engine": "item/smallengine",
+  "Survival Fish Trap": "item/fishtrap.small",
+  "Small Planter Box": "item/planter.small",
+  "Small Water Bottle": "item/smallwaterbottle",
+  "Workbench Level 1": "item/workbench1",
+  "Workbench Level 2": "item/workbench2",
+  "Workbench Level 3": "item/workbench3",
+  "High Quality Metal": "item/metal.refined",
+  "High Quality Metal Ore": "item/hq.metal.ore",
+  "Low Grade Fuel": "item/lowgradefuel",
+  "Empty Can Of Beans": "item/can.beans.empty",
+  "Empty Tuna Can": "item/can.tuna.empty",
+  "Garry's Mod Tool Gun": "item/toolgun",
+  "Handmade Fishing Rod": "item/fishingrod.handmade",
+  "12 Gauge Buckshot": "item/ammo.shotgun",
+  "12 Gauge Incendiary Shell": "item/ammo.shotgun.fire",
+  "12 Gauge Slug": "item/ammo.shotgun.slug",
+  "40mm HE Grenade": "item/ammo.grenadelauncher.he",
+  "40mm Shotgun Round": "item/ammo.grenadelauncher.buckshot",
+  "40mm Smoke Grenade": "item/ammo.grenadelauncher.smoke",
+  "5.56 Rifle Ammo": "item/ammo.rifle",
+  "Explosive 5.56 Rifle Ammo": "item/ammo.rifle.explosive",
+  "HV 5.56 Rifle Ammo": "item/ammo.rifle.hv",
+  "HV Pistol Ammo": "item/ammo.pistol.hv",
+  "Incendiary 5.56 Rifle Ammo": "item/ammo.rifle.incendiary",
+  "Incendiary Pistol Bullet": "item/ammo.pistol.fire",
+  "Pistol Bullet": "item/ammo.pistol",
+  "Rocket": "item/ammo.rocket.basic",
+  "Incendiary Rocket": "item/ammo.rocket.fire",
+  "High Velocity Rocket": "item/ammo.rocket.hv",
+  "SAM Ammo": "item/ammo.rocket.sam",
+  "Advanced Blueprint Fragment": "item/advancedblueprintfragment",
+  "Basic Blueprint Fragment": "item/basicblueprintfragment",
+  "Armored Cockpit Vehicle Module": "item/vehicle.1mod.cockpit.armored",
+  "Armored Passenger Vehicle Module": "item/vehicle.1mod.passengers.armored",
+  "Cockpit Vehicle Module": "item/vehicle.1mod.cockpit",
+  "Cockpit With Engine Vehicle Module": "item/vehicle.1mod.cockpit.with.engine",
+  "Engine Vehicle Module": "item/vehicle.1mod.engine",
+  "Flatbed Vehicle Module": "item/vehicle.1mod.flatbed",
+  "Fuel Tank Vehicle Module": "item/vehicle.2mod.fuel.tank",
+  "Large Flatbed Vehicle Module": "item/vehicle.2mod.flatbed",
+  "Passenger Vehicle Module": "item/vehicle.2mod.passengers",
+  "Rear Seats Vehicle Module": "item/vehicle.1mod.rear.seats",
+  "Storage Vehicle Module": "item/vehicle.1mod.storage",
+  "Taxi Vehicle Module": "item/vehicle.1mod.taxi",
+  "Camper Vehicle Module": "item/vehicle.2mod.camper",
+  "High Quality Carburetor": "item/carburetor3",
+  "High Quality Crankshaft": "item/crankshaft3",
+  "High Quality Pistons": "item/piston3",
+  "High Quality Spark Plugs": "item/sparkplug3",
+  "High Quality Valves": "item/valve3",
+  "Medium Quality Carburetor": "item/carburetor2",
+  "Medium Quality Crankshaft": "item/crankshaft2",
+  "Medium Quality Pistons": "item/piston2",
+  "Medium Quality Spark Plugs": "item/sparkplug2",
+  "Medium Quality Valves": "item/valve2",
+  "Low Quality Carburetor": "item/carburetor1",
+  "Low Quality Crankshaft": "item/crankshaft1",
+  "Low Quality Pistons": "item/piston1",
+  "Low Quality Spark Plugs": "item/sparkplug1",
+  "Low Quality Valves": "item/valve1",
+  "MLRS Aiming Module": "item/aiming.module.mlrs",
+  "AND Switch": "item/electric.andswitch",
+  "OR Switch": "item/electric.orswitch",
+  "XOR Switch": "item/electric.xorswitch",
+  "RAND Switch": "item/electric.random.switch",
+  "Large Rechargeable Battery": "item/electric.battery.rechargable.large",
+  "Medium Rechargeable Battery": "item/electric.battery.rechargable.medium",
+  "Small Rechargeable Battery": "item/electric.battery.rechargable.small",
+  "Large Solar Panel": "item/electric.solarpanel.large",
+  "Large Animated Neon Sign": "item/sign.neon.xl.animated",
+  "Large Neon Sign": "item/sign.neon.xl",
+  "Medium Animated Neon Sign": "item/sign.neon.125x215.animated",
+  "Medium Neon Sign": "item/sign.neon.125x215",
+  "Small Neon Sign": "item/sign.neon.125x125",
+  "Cassette - Long": "item/cassette",
+  "Cassette - Medium": "item/cassette.medium",
+  "Cassette - Short": "item/cassette.short",
+  "Portable Boom Box": "item/fun.boomboxportable",
+  "Cassette Recorder": "item/fun.casetterecorder",
+  "Blue Boomer": "item/firework.boomer.blue",
+  "Green Boomer": "item/firework.boomer.green",
+  "Orange Boomer": "item/firework.boomer.orange",
+  "Red Boomer": "item/firework.boomer.red",
+  "Violet Boomer": "item/firework.boomer.violet",
+  "Champagne Boomer": "item/firework.boomer.champagne",
+  "Pattern Boomer": "item/firework.boomer.pattern",
+  "Blue Roman Candle": "item/firework.romancandle.blue",
+  "Green Roman Candle": "item/firework.romancandle.green",
+  "Red Roman Candle": "item/firework.romancandle.red",
+  "Violet Roman Candle": "item/firework.romancandle.violet",
+  "Red Volcano Firework": "item/firework.volcano.red",
+  "Violet Volcano Firework": "item/firework.volcano.violet",
+  "White Volcano Firework": "item/firework.volcano",
+  "Rustig\xE9 Egg - Blue": "item/rustige_egg_a",
+  "Rustig\xE9 Egg - Cerulean": "item/rustige_egg_b",
+  "Rustig\xE9 Egg - Green": "item/rustige_egg_c",
+  "Rustig\xE9 Egg - Ivory": "item/rustige_egg_d",
+  "Rustig\xE9 Egg - Purple": "item/rustige_egg_e",
+  "Rustig\xE9 Egg - Red": "item/rustige_egg_f",
+  "Rustig\xE9 Egg - White": "item/rustige_egg_g",
+  "Large Present": "item/xmas.present.large",
+  "Medium Present": "item/xmas.present.medium",
+  "Small Present": "item/xmas.present.small",
+  "Large Loot Bag": "item/halloween.lootbag.large",
+  "Medium Loot Bag": "item/halloween.lootbag.medium",
+  "Small Loot Bag": "item/halloween.lootbag.small",
+  "SUPER Stocking": "item/stocking.large",
+  "Small Stocking": "item/stocking.small"
+};
+var WIKI_ITEM_TITLES = [
+  "8x Zoom Scope",
+  "Ballista",
+  "Battering Ram",
+  "Beancan Grenade",
+  "Bee Grenade",
+  "Blow Pipe",
+  "Bolt Action Rifle",
+  "Bone Club",
+  "Boomerang",
+  "Butcher Knife",
+  "Candy Cane Club",
+  "Catapult",
+  "Compound Bow",
+  "Crossbow",
+  "Custom SMG",
+  "Eoka Pistol",
+  "Extended Magazine",
+  "F1 Grenade",
+  "Flame Thrower",
+  "Flashbang",
+  "Gas Compression Overdrive",
+  "Handmade SMG",
+  "High Caliber Revolver",
+  "HMLMG",
+  "Holosight",
+  "Homing Missile Launcher",
+  "Hunting Bow",
+  "L96 Rifle",
+  "Longsword",
+  "LR-300 Assault Rifle",
+  "M249",
+  "M39 Rifle",
+  "M4 Shotgun",
+  "M92 Pistol",
+  "Machete",
+  "Military Silencer",
+  "Mini Crossbow",
+  "Minigun",
+  "Molotov Cocktail",
+  "Mounted Ballista",
+  "MP5A4",
+  "Multiple Grenade Launcher",
+  "Muzzle Boost",
+  "Muzzle Brake",
+  "Nailgun",
+  "Oil Filter Silencer",
+  "Paddle",
+  "Paintball Gun",
+  "Pitchfork",
+  "Prototype 17",
+  "Pump Shotgun",
+  "Python Revolver",
+  "Revolver",
+  "Salvaged Cleaver",
+  "Salvaged Sword",
+  "Semi-Automatic Pistol",
+  "Semi-Automatic Rifle",
+  "Siege Tower",
+  "Simple Handmade Sight",
+  "Skinning Knife",
+  "SKS",
+  "Snowball",
+  "Snowball Gun",
+  "Soda Can Silencer",
+  "Spas-12 Shotgun",
+  "Speargun",
+  "Stone Spear",
+  "Targeting Attachment",
+  "Thompson",
+  "Vampire Stake",
+  "Variable Zoom Scope",
+  "Water Gun",
+  "Water Pistol",
+  "Waterpipe Shotgun",
+  "Weapon flashlight",
+  "Weapon Lasersight",
+  "Armored Door",
+  "Armored Double Door",
+  "Barbed Wooden Barricade",
+  "Beehive",
+  "Blueprint",
+  "Boat Building Plan",
+  "Building Plan",
+  "Chainlink Fence",
+  "Chainlink Fence Gate",
+  "Code Lock",
+  "Concrete Barricade",
+  "Door Closer",
+  "Floor grill",
+  "Floor triangle grill",
+  "Garage Door",
+  "High External Wooden Gate",
+  "High External Wooden Wall",
+  "High Ice Wall",
+  "Key Lock",
+  "Ladder Hatch",
+  "Large Water Catcher",
+  "Legacy Wood Shelter",
+  "Medieval Barricade",
+  "Metal Barricade",
+  "Metal horizontal embrasure",
+  "Metal Shop Front",
+  "Metal Vertical embrasure",
+  "Metal Window Bars",
+  "Mining Quarry",
+  "Netting",
+  "Prison Cell Gate",
+  "Prison Cell Wall",
+  "Pump Jack",
+  "Reinforced Glass Window",
+  "Sandbag Barricade",
+  "Shop Front",
+  "Short Ice Wall",
+  "Small Water Catcher",
+  "Stone Barricade",
+  "Strengthened Glass Window",
+  "Triangle Ladder Hatch",
+  "Watch Tower",
+  "Wood Double Door",
+  "Wood Shutters",
+  "Wooden Barricade",
+  "Wooden Barricade Cover",
+  "Wooden Door",
+  "Wooden Frontier Bar Doors",
+  "Wooden Ladder",
+  "Wooden Window Bars",
+  "Abyss Horizontal Storage Tank",
+  "Abyss Vertical Storage Tank",
+  "Advent Calendar",
+  "Anchor",
+  "Artist Canvas Large",
+  "Artist Canvas Small",
+  "Artist Canvas Standing",
+  "Artist Canvas XL",
+  "Artist Canvas XXL",
+  "Asbestos Armor Insert",
+  "Bamboo Barrel",
+  "Barbeque",
+  "Bath Tub Planter",
+  "Bear Skin Rug",
+  "Bed",
+  "Boat Building Station",
+  "Bota Bag",
+  "Camp Fire",
+  "Cancer Research UK Plushie",
+  "Cannon",
+  "Carvable Pumpkin",
+  "Chicken Coop",
+  "Chinese Lantern",
+  "Chinese Lantern White",
+  "Chippy Arcade Game",
+  "Christmas Door Wreath",
+  "Christmas Lights",
+  "Christmas Tree",
+  "Circle Balloon",
+  "Clan Table",
+  "Clothing Mannequin",
+  "Clump of Latex Balloons",
+  "Composter",
+  "Cooking Workbench",
+  "Discord Trophy",
+  "Diver propulsion vehicle",
+  "Double Sign Post",
+  "Dragon Door Knocker",
+  "Drone",
+  "Drop Box",
+  "Easter Door Wreath",
+  "Engineering Workbench",
+  "Festive Doorway Garland",
+  "Festive Double Doorway Garland",
+  "Festive Window Garland",
+  "Fish Trophy",
+  "Frankenstein Table",
+  "Frontier Bolts Single Item Rack",
+  "Frontier Horns Single Item Rack",
+  "Frontier Horseshoe Single Item Rack",
+  "Half Height Bamboo Shelves",
+  "Hazmat Plushy",
+  "Hazmat Youtooz",
+  "Heart Balloon",
+  "Heavy Scientist Plushie",
+  "Heavy Scientist Youtooz",
+  "Hitch & Trough",
+  "Hobo Barrel",
+  "Horizontal Weapon Rack",
+  "Huge Wooden Sign",
+  "Jack O Lantern Angry",
+  "Jack O Lantern Happy",
+  "Kayak",
+  "Krieg Storage Barrel",
+  "Krieg Storage Crates",
+  "Landscape Photo Frame",
+  "Landscape Picture Frame",
+  "Lantern",
+  "Large Banner Hanging",
+  "Large Banner on pole",
+  "Large Furnace",
+  "Large Hunting Trophy",
+  "Large Photo Frame",
+  "Large Wooden Sign",
+  "Latex Balloon",
+  "Lead Armor Insert",
+  "Light-Up Frame Large",
+  "Light-Up Frame Small",
+  "Light-Up Frame Standing",
+  "Light-Up Frame XL",
+  "Light-Up Frame XXL",
+  "Locker",
+  "Mail Box",
+  "Medium Wooden Sign",
+  "Metal Armor Insert",
+  "Minecart Planter",
+  "Mixing Table",
+  "One Sided Town Sign Post",
+  "Ornate Frame large",
+  "Ornate Frame Small",
+  "Ornate Frame Standing",
+  "Ornate Frame XL",
+  "Ornate Frame XXL",
+  "Paper Map",
+  "Plank",
+  "Pookie Bear",
+  "Portable Easel",
+  "Portrait Photo Frame",
+  "Portrait Picture Frame",
+  "Repair Bench",
+  "Research Table",
+  "Ronald McDonald House UK Plushie",
+  "Rug",
+  "Sail",
+  "Scarecrow",
+  "Scientist Plushie",
+  "Secretlab Chair",
+  "Shutter Frame large",
+  "Shutter Frame Small",
+  "Shutter Frame Standing",
+  "Shutter Frame XL",
+  "Shutter Frame XXL",
+  "Single Plant Pot",
+  "Single Shallow Wall Shelves",
+  "Single Sign Post",
+  "Skull Door Knocker",
+  "Skull Fire Pit",
+  "Sleeping Bag",
+  "Small Boat Engine",
+  "Small Hunting Trophy",
+  "Small Oil Refinery",
+  "Small Planter Box",
+  "Small Ramp",
+  "Small Stash",
+  "Small Stocking",
+  "Small Wooden Sign",
+  "Snake Venom",
+  "Snowman",
+  "Sofa",
+  "Sofa - Pattern",
+  "Speech Bubble Balloon",
+  "Spinning Wheel",
+  "Star Balloon",
+  "Steering Wheel",
+  "Stone Fireplace",
+  "Storage Barrel Horizontal",
+  "Storage Barrel Vertical",
+  "SUPER Stocking",
+  "Survival Fish Trap",
+  "Table",
+  "Tall Picture Frame",
+  "Tall Weapon Rack",
+  "Torch Holder",
+  "Tuna Can Lamp",
+  "Twitch Rivals 2025 Sofa",
+  "Twitch Rivals Trophy",
+  "Twitch Rivals Trophy 2023",
+  "Two Sided Hanging Sign",
+  "Two Sided Ornate Hanging Sign",
+  "Two Sided Town Sign Post",
+  "Vending Machine",
+  "Wall Cabinet",
+  "Water Barrel",
+  "Water Purifier",
+  "Weapon Rack Stand",
+  "Wicker Barrel",
+  "Wide Weapon Rack",
+  "Wood Storage Box",
+  "Wooden Armor Insert",
+  "Workbench Level 1",
+  "Workbench Level 2",
+  "Workbench Level 3",
+  "XL Picture Frame",
+  "XXL Picture Frame",
+  "Animal Fat",
+  "Battery - Small",
+  "Beehive Nucleus",
+  "Bone Fragments",
+  "CCTV Camera",
+  "Charcoal",
+  "Cloth",
+  "Coal :(",
+  "Crude Oil",
+  "Diesel Fuel",
+  "Empty Can Of Beans",
+  "Empty Tuna Can",
+  "Explosives",
+  "Fertilizer",
+  "Gun Powder",
+  "High Quality Metal",
+  "High Quality Metal Ore",
+  "Horse Dung",
+  "Human Skull",
+  "Leather",
+  "Low Grade Fuel",
+  "Metal Fragments",
+  "Metal Ore",
+  "Paper",
+  "Plant Fiber",
+  "Radioactive Water",
+  "Research Paper",
+  "Salt Water",
+  "Scrap",
+  "Stones",
+  "Sulfur",
+  "Sulfur Ore",
+  "Targeting Computer",
+  "Water",
+  "Wolf Skull",
+  "Wood",
+  "A Barrel Costume",
+  "Arctic Scientist Suit",
+  "Bandana Mask",
+  "Bandit Guard Gear",
+  "Baseball Cap",
+  "Basic Horse Shoes",
+  "Beenie Hat",
+  "Blue Jumpsuit",
+  "Bone Armor",
+  "Bone Helmet",
+  "Boonie Hat",
+  "Boots",
+  "Bucket Helmet",
+  "Bunny Ears",
+  "Bunny Hat",
+  "Bunny Onesie",
+  "Burlap Gloves",
+  "Burlap Headwrap",
+  "Burlap Shirt",
+  "Burlap Shoes",
+  "Burlap Trousers",
+  "Candle Hat",
+  "Card Movember Moustache",
+  "Chicken Costume",
+  "Clatter Helmet",
+  "Crate Costume",
+  "Diving Fins",
+  "Diving Mask",
+  "Diving Tank",
+  "Double Diving Tank",
+  "Double Horse Saddle",
+  "Dracula Cape",
+  "Dracula Mask",
+  "Dragon Mask",
+  "Egg Suit",
+  "Frankenstein Mask",
+  "Frog Boots",
+  "Gas Mask",
+  "Ghost Costume",
+  "Gingerbread Suit",
+  "Glowing Eyes",
+  "Headset",
+  "Heavy Frankenstein Head",
+  "Heavy Frankenstein Legs",
+  "Heavy Frankenstein Torso",
+  "Heavy Plate Helmet",
+  "Heavy Plate Jacket",
+  "Heavy Plate Pants",
+  "Heavy Scientist Suit",
+  "Hide Boots",
+  "Hide Halterneck",
+  "Hide Pants",
+  "Hide Poncho",
+  "Hide Skirt",
+  "Hide Vest",
+  "High Quality Horse Shoes",
+  "Hoodie",
+  "Horse Costume",
+  "Horse Mask",
+  "Hot Air Balloon Armor",
+  "Improvised Balaclava",
+  "Jacket",
+  "Jumpsuit",
+  "Large Backpack",
+  "Leather Gloves",
+  "Light Frankenstein Head",
+  "Light Frankenstein Legs",
+  "Light Frankenstein Torso",
+  "Longsleeve T-Shirt",
+  "Medium Frankenstein Head",
+  "Medium Frankenstein Legs",
+  "Medium Frankenstein Torso",
+  "Metal Shield",
+  "Miners Hat",
+  "Movember Moustache",
+  "Mummy Mask",
+  "Mummy Suit",
+  "Naval Scientist Suit",
+  "Nest Hat",
+  "Night Vision Goggles",
+  "Ninja Suit",
+  "NVGM Scientist Suit",
+  "Outbreak Scientist Suit",
+  "Ox Mask",
+  "Paintball Overalls",
+  "Pants",
+  "Parachute",
+  "Party Hat",
+  "Prisoner Hood",
+  "Purple Sunglasses",
+  "Rabbit Mask",
+  "Rat Mask",
+  "Reindeer Antlers",
+  "Reinforced Wooden Shield",
+  "Riot Helmet",
+  "Road Sign Gloves",
+  "Roadsign Horse Armor",
+  "Saddle bag",
+  "Santa Beard",
+  "Santa Hat",
+  "Scarecrow Suit",
+  "Scarecrow Wrap",
+  "Scientist Suit",
+  "Shirt",
+  "Shorts",
+  "Silly Horse Mask",
+  "Single Horse Saddle",
+  "Small Backpack",
+  "Snake mask",
+  "Snow Jacket",
+  "Snowman Helmet",
+  "Surgeon Scrubs",
+  "T-Shirt",
+  "Tactical Gloves",
+  "Tank Top",
+  "Tiger Mask",
+  "Twitch Rivals Flag",
+  "Waterwell NPC Jumpsuit",
+  "Wellipets Hat",
+  "Wetsuit",
+  "Wolf Headdress",
+  "Wooden Horse Armor",
+  "Wooden Shield",
+  "Binoculars",
+  "Birthday Cake",
+  "Camera",
+  "Chainsaw",
+  "Compass",
+  "Documents",
+  "Fishing Tackle",
+  "Flare",
+  "Flashlight",
+  "Garry's Mod Tool Gun",
+  "Geiger Counter",
+  "Hammer",
+  "Handcuffs",
+  "Handmade Fishing Rod",
+  "Instant Camera",
+  "Jackhammer",
+  "Metal Detector",
+  "RF Transmitter",
+  "Salvaged Axe",
+  "Salvaged Hammer",
+  "Salvaged Icepick",
+  "Satchel Charge",
+  "Shovel",
+  "Smoke Grenade",
+  "Spray Can",
+  "Supply Signal",
+  "Survey Charge",
+  "Timed Explosive Charge",
+  "Wallpaper Tool",
+  "Water Bucket",
+  "Anti-Radiation Pills",
+  "Bandage",
+  "Blood",
+  "Large Medkit",
+  "Medical Syringe",
+  "Advanced Anti-Rad Tea",
+  "Advanced Cooling Tea",
+  "Advanced Crafting Quality Tea",
+  "Advanced Harvesting Tea",
+  "Advanced Healing Tea",
+  "Advanced Max Health Tea",
+  "Advanced Ore Tea",
+  "Advanced Rad. Removal Tea",
+  "Advanced Scrap Tea",
+  "Advanced Warming Tea",
+  "Advanced Wood Tea",
+  "Anchovy",
+  "Apple",
+  "Apple Pie",
+  "Basic Anti-Rad Tea",
+  "Basic Cooling Tea",
+  "Basic Crafting Quality Tea",
+  "Basic Harvesting Tea",
+  "Basic Healing Tea",
+  "Basic Max Health Tea",
+  "Basic Ore Tea",
+  "Basic Scrap Tea",
+  "Basic Warming Tea",
+  "Basic Wood Tea",
+  "Bear Pie",
+  "Big Cat Pie",
+  "Black Berry",
+  "Black Berry Clone",
+  "Black Berry Seed",
+  "Black Raspberries",
+  "Blue Berry",
+  "Blue Berry Clone",
+  "Blue Berry Seed",
+  "Blueberries",
+  "Bread Loaf",
+  "Burnt Bear Meat",
+  "Burnt Chicken",
+  "Burnt Deer Meat",
+  "Burnt Horse Meat",
+  "Burnt Human Meat",
+  "Burnt Pork",
+  "Burnt Wolf Meat",
+  "Cactus Flesh",
+  "Can of Beans",
+  "Can of Tuna",
+  "Candy Cane",
+  "Catfish",
+  "Chicken Pie",
+  "Chocolate Bar",
+  "Coconut",
+  "Cooked Bear Meat",
+  "Cooked Big Cat Meat",
+  "Cooked Chicken",
+  "Cooked Crocodile Meat",
+  "Cooked Deer Meat",
+  "Cooked Fish",
+  "Cooked Horse Meat",
+  "Cooked Human Meat",
+  "Cooked Pork",
+  "Cooked Snake Meat",
+  "Cooked Wolf Meat",
+  "Corn",
+  "Corn Clone",
+  "Corn Seed",
+  "Crocodile Pie",
+  "Egg",
+  "Fish Pie",
+  "Granola Bar",
+  "Green Berry",
+  "Green Berry Clone",
+  "Green Berry Seed",
+  "Grub",
+  "Hemp Clone",
+  "Hemp Seed",
+  "Herring",
+  "Honeycomb",
+  "Hunters Pie",
+  "Jar of Honey",
+  "Minnows",
+  "Mr Spice Can",
+  "Mushroom",
+  "Orange Roughy",
+  "Orchid",
+  "Orchid Clone",
+  "Orchid Seed",
+  "Pickles",
+  "Pork Pie",
+  "Potato",
+  "Potato Clone",
+  "Potato Seed",
+  "Pumpkin",
+  "Pumpkin Pie",
+  "Pumpkin Plant Clone",
+  "Pumpkin Seed",
+  "Pure Anti-Rad Tea",
+  "Pure Cooling Tea",
+  "Pure Crafting Quality Tea",
+  "Pure Harvesting Tea",
+  "Pure Healing Tea",
+  "Pure Max Health Tea",
+  "Pure Ore Tea",
+  "Pure Rad. Removal Tea",
+  "Pure Scrap Tea",
+  "Pure Warming Tea",
+  "Pure Wood Tea",
+  "Rad. Removal Tea",
+  "Raw Bear Meat",
+  "Raw Big Cat Meat",
+  "Raw Chicken Breast",
+  "Raw Crocodile Meat",
+  "Raw Deer Meat",
+  "Raw Fish",
+  "Raw Horse Meat",
+  "Raw Human Meat",
+  "Raw Pork",
+  "Raw Snake Meat",
+  "Raw Wolf Meat",
+  "Red Berry",
+  "Red Berry Clone",
+  "Red Berry Seed",
+  "Rose",
+  "Rose Clone",
+  "Rose Seed",
+  "Rotten Apple",
+  "Salmon",
+  "Sardine",
+  "Small Shark",
+  "Small Trout",
+  "Small Water Bottle",
+  "Spoiled Bear Meat",
+  "Spoiled Big Cat Meat",
+  "Spoiled Chicken",
+  "Spoiled Crocodile Meat",
+  "Spoiled Deer Meat",
+  "Spoiled Fish Meat",
+  "Spoiled Horse Meat",
+  "Spoiled Human Meat",
+  "Spoiled Pork Meat",
+  "Spoiled Produce",
+  "Spoiled Snake Meat",
+  "Spoiled Wolf Meat",
+  "Sunflower",
+  "Sunflower Clone",
+  "Sunflower Seed",
+  "Super Serum",
+  "Survivor's Pie",
+  "Vodka Bottle",
+  "Water Jug",
+  "Wheat",
+  "Wheat Clone",
+  "Wheat Seed",
+  "White Berry",
+  "White Berry Clone",
+  "White Berry Seed",
+  "Worm",
+  "Yellow Berry",
+  "Yellow Berry Clone",
+  "Yellow Berry Seed",
+  "Yellow Perch",
+  "12 Gauge Buckshot",
+  "12 Gauge Incendiary Shell",
+  "12 Gauge Slug",
+  "40mm HE Grenade",
+  "40mm Shotgun Round",
+  "40mm Smoke Grenade",
+  "5.56 Rifle Ammo",
+  "Bee Catapult Bomb",
+  "Bone Arrow",
+  "Cannonball",
+  "Explosive 5.56 Rifle Ammo",
+  "Fire Arrow",
+  "Firebomb",
+  "Hammerhead Bolt",
+  "Handmade Shell",
+  "High Velocity Arrow",
+  "High Velocity Rocket",
+  "HV 5.56 Rifle Ammo",
+  "HV Pistol Ammo",
+  "Incapacitate Dart",
+  "Incendiary 5.56 Rifle Ammo",
+  "Incendiary Bolt",
+  "Incendiary Pistol Bullet",
+  "Incendiary Rocket",
+  "Nailgun Nails",
+  "Paintball",
+  "Piercer Bolt",
+  "Pistol Bullet",
+  "Pitchfork Bolt",
+  "Propane Explosive Bomb",
+  "Radiation Dart",
+  "Rocket",
+  "SAM Ammo",
+  "Scatter Dart",
+  "Scattershot",
+  "Speargun Spear",
+  "Wood Dart",
+  "Wooden Arrow",
+  "Flame Turret",
+  "Homemade Landmine",
+  "SAM Site",
+  "Shotgun Trap",
+  "Small Spike Trap",
+  "Snap Trap",
+  "Tesla Coil",
+  "Tin Can Alarm",
+  "Wooden Floor Spikes",
+  "Advanced Blueprint Fragment",
+  "Armored Cockpit Vehicle Module",
+  "Armored Passenger Vehicle Module",
+  "Basic Blueprint Fragment",
+  "Bleach",
+  "Burst Module",
+  "Camper Vehicle Module",
+  "Cockpit Vehicle Module",
+  "Cockpit With Engine Vehicle Module",
+  "Duct Tape",
+  "Electric Fuse",
+  "Empty Propane Tank",
+  "Engine Vehicle Module",
+  "Flatbed Vehicle Module",
+  "Fuel Tank Vehicle Module",
+  "Gears",
+  "Glue",
+  "High Quality Carburetor",
+  "High Quality Crankshaft",
+  "High Quality Pistons",
+  "High Quality Spark Plugs",
+  "High Quality Valves",
+  "Large Flatbed Vehicle Module",
+  "Low Quality Carburetor",
+  "Low Quality Crankshaft",
+  "Low Quality Pistons",
+  "Low Quality Spark Plugs",
+  "Low Quality Valves",
+  "Medium Quality Carburetor",
+  "Medium Quality Crankshaft",
+  "Medium Quality Pistons",
+  "Medium Quality Spark Plugs",
+  "Medium Quality Valves",
+  "Metal Blade",
+  "Metal Pipe",
+  "Metal Spring",
+  "MLRS Aiming Module",
+  "Passenger Vehicle Module",
+  "Rear Seats Vehicle Module",
+  "Rifle Body",
+  "Road Signs",
+  "Rope",
+  "Semi Automatic Body",
+  "Sewing Kit",
+  "Sheet Metal",
+  "SMG Body",
+  "Sticks",
+  "Storage Vehicle Module",
+  "Tarp",
+  "Taxi Vehicle Module",
+  "Tech Trash",
+  "AND Switch",
+  "Audio Alarm",
+  "Auto Turret",
+  "Blocker",
+  "Bulb String Lights",
+  "Button",
+  "Cable Tunnel",
+  "Ceiling Light",
+  "Chandelier",
+  "Command Block",
+  "Counter",
+  "Deluxe Christmas Lights",
+  "Digital Clock",
+  "Door Controller",
+  "Electric Furnace",
+  "Electric Heater",
+  "Electric Table Lamp",
+  "Electrical Branch",
+  "Elevator",
+  "Fairy Lights",
+  "Flasher Light",
+  "Fluid Combiner",
+  "Fluid Splitter",
+  "Fluid Switch & Pump",
+  "Fluorescent Light",
+  "Fridge",
+  "HBHF Sensor",
+  "Hopper",
+  "Hose Tool",
+  "Igniter",
+  "Industrial Combiner",
+  "Industrial Conveyor",
+  "Industrial Crafter",
+  "Industrial Splitter",
+  "Large Animated Neon Sign",
+  "Large Neon Sign",
+  "Large Rechargeable Battery",
+  "Large Solar Panel",
+  "Laser Detector",
+  "Medium Animated Neon Sign",
+  "Medium Neon Sign",
+  "Medium Rechargeable Battery",
+  "Memory Cell",
+  "Mini Fridge",
+  "Modular Car Lift",
+  "OR Switch",
+  "Pipe Tool",
+  "Powered Water Purifier",
+  "Pressure Pad",
+  "PTZ CCTV Camera",
+  "RAND Switch",
+  "Reactive Target",
+  "RF Broadcaster",
+  "RF Pager",
+  "RF Receiver",
+  "Root Combiner",
+  "Search Light",
+  "Seismic Sensor",
+  "Simple Light",
+  "Siren Light",
+  "Small Generator",
+  "Small Neon Sign",
+  "Small Rechargeable Battery",
+  "Smart Alarm",
+  "Smart Switch",
+  "Splitter",
+  "Spot Light",
+  "Sprinkler",
+  "Storage Adaptor",
+  "Storage Monitor",
+  "Switch",
+  "Tesla Coil",
+  "Test Generator",
+  "Timer",
+  "Tripod Spot Light",
+  "Twitch Rivals Neon Sign",
+  "Water Pump",
+  "Wind Turbine",
+  "Wire Tool",
+  "XOR Switch",
+  "Above Ground Pool",
+  "Acoustic Guitar",
+  "Beach Chair",
+  "Beach Parasol",
+  "Beach Table",
+  "Beach Towel",
+  "Blue Boomer",
+  "Boogie Board",
+  "Boom Box",
+  "Canbourine",
+  "Car Radio",
+  "Cassette - Long",
+  "Cassette - Medium",
+  "Cassette - Short",
+  "Cassette Recorder",
+  "Champagne Boomer",
+  "Confetti Cannon",
+  "Connected Speaker",
+  "Cowbell",
+  "Disco Ball",
+  "Firecracker String",
+  "Green Boomer",
+  "Green Roman Candle",
+  "Jerry Can Guitar",
+  "Junkyard Drum Kit",
+  "Laser Light",
+  "Megaphone",
+  "Microphone Stand",
+  "Mobile Phone",
+  "New Year Gong",
+  "Orange Boomer",
+  "Paddling Pool",
+  "Pan Flute",
+  "Pattern Boomer",
+  "Pinata",
+  "Plumber's Trumpet",
+  "Portable Boom Box",
+  "Red Boomer",
+  "Red Roman Candle",
+  "Red Volcano Firework",
+  "Shovel Bass",
+  "Sled",
+  "Sound Light",
+  "Sousaphone",
+  "Telephone",
+  "Violet Boomer",
+  "Violet Roman Candle",
+  "Violet Volcano Firework",
+  "Wheelbarrow Piano",
+  "White Volcano Firework",
+  "Wrapped Gift",
+  "Wrapping Paper",
+  "Xylobone",
+  "Blue Keycard",
+  "Bronze Egg",
+  "Captain's Log",
+  "Coffin",
+  "Cursed Cauldron",
+  "Decorative Baubels",
+  "Decorative Gingerbread Men",
+  "Decorative Pinecones",
+  "Decorative Plastic Candy Canes",
+  "Decorative Tinsel",
+  "Door Key",
+  "Egg Basket",
+  "Fogger-3000",
+  "Giant Candy Decor",
+  "Giant Lollipop Decor",
+  "Gold Egg",
+  "Gravestone",
+  "Graveyard Fence",
+  "Green Keycard",
+  "Hab Repair",
+  "Halloween Candy",
+  "Head Bag",
+  "Large Candle Set",
+  "Large Loot Bag",
+  "Large Present",
+  "MC repair",
+  "Medium Loot Bag",
+  "Medium Present",
+  "Note",
+  "Painted Egg",
+  "Pumpkin Basket",
+  "Red Keycard",
+  "Rustig\xE9 Egg - Blue",
+  "Rustig\xE9 Egg - Cerulean",
+  "Rustig\xE9 Egg - Green",
+  "Rustig\xE9 Egg - Ivory",
+  "Rustig\xE9 Egg - Purple",
+  "Rustig\xE9 Egg - Red",
+  "Rustig\xE9 Egg - White",
+  "ScrapTransportHeliRepair",
+  "Sickle",
+  "Silver Egg",
+  "Small Candle Set",
+  "Small Loot Bag",
+  "Small Present",
+  "Snow Machine",
+  "Spider Webs",
+  "Spooky Speaker",
+  "Star Tree Topper",
+  "Strobe Light",
+  "Tree Lights",
+  "Wooden Cross"
+];
+function getItemAddress(title) {
+  const override = ITEM_ADDRESS_OVERRIDES[title];
+  if (override) return override.includes("/") ? override : `item/${override}`;
+  return `item/${toItemSlug(title)}`;
+}
+function toItemSlug(title) {
+  return title.toLowerCase().replace(/[^a-z0-9]/g, "").replace(/^item\//, "");
+}
+function resolveWikiUrl(pageOrQuery) {
+  const q = pageOrQuery.trim();
+  if (!q) return null;
+  if (q.startsWith("http") && q.includes("wiki.facepunch.com")) return q;
+  const exact = WIKI_PAGES.find(
+    (e) => e.address.toLowerCase() === q.toLowerCase() || e.title.toLowerCase() === q.toLowerCase()
+  );
+  if (exact) return `${WIKI_BASE}/${exact.address}`;
+  const directAddress = q.replace(/\s+/g, "_").replace(/,/g, "");
+  const directMatch = WIKI_PAGES.find(
+    (e) => e.address.toLowerCase() === directAddress.toLowerCase()
+  );
+  if (directMatch) return `${WIKI_BASE}/${directMatch.address}`;
+  const qLower = q.toLowerCase();
+  const words = qLower.split(/\s+/).filter(Boolean);
+  const scoreEntry = (e) => {
+    let score = 0;
+    const titleLower = e.title.toLowerCase();
+    const tags = (e.tags ?? []).map((t) => t.toLowerCase());
+    if (titleLower.includes(qLower)) score += 10;
+    if (qLower.includes(titleLower) && titleLower.length > 2) score += 8;
+    for (const w of words) {
+      if (titleLower.includes(w)) score += 4;
+      if (tags.some((t) => t.includes(w) || w.includes(t))) score += 3;
+    }
+    return { entry: e, score };
+  };
+  const fromPages = WIKI_PAGES.map(scoreEntry).filter((x) => x.score > 0);
+  const fromItems = WIKI_ITEM_TITLES.map((t) => scoreEntry(toItemEntry(t))).filter((x) => x.score > 0);
+  const scored = [...fromPages, ...fromItems];
+  scored.sort((a, b) => b.score - a.score);
+  if (scored.length > 0) return `${WIKI_BASE}/${scored[0].entry.address}`;
+  const slug = q.replace(/\s+/g, "_").replace(/[^\w\-_.]/g, "");
+  if (slug.length > 1) return `${WIKI_BASE}/${slug}`;
+  return null;
+}
+function toItemEntry(title) {
+  return { title, address: getItemAddress(title) };
+}
+function searchWikiPages(query, limit = 15) {
+  const q = query.toLowerCase().trim();
+  if (!q) return [];
+  const words = q.split(/\s+/).filter(Boolean);
+  const scoreEntry = (e) => {
+    let score = 0;
+    const titleLower = e.title.toLowerCase();
+    const addrLower = e.address.toLowerCase();
+    const tags = (e.tags ?? []).map((t) => t.toLowerCase());
+    if (titleLower.includes(q)) score += 10;
+    if (addrLower.includes(q)) score += 8;
+    for (const w of words) {
+      if (titleLower.includes(w)) score += 4;
+      if (addrLower.includes(w)) score += 3;
+      if (tags.some((t) => t.includes(w) || w.includes(t))) score += 3;
+    }
+    return { entry: e, score };
+  };
+  const fromPages = WIKI_PAGES.map(scoreEntry).filter((x) => x.score > 0);
+  const fromItems = WIKI_ITEM_TITLES.map((t) => scoreEntry(toItemEntry(t))).filter((x) => x.score > 0);
+  const merged = [...fromPages, ...fromItems];
+  merged.sort((a, b) => b.score - a.score);
+  return merged.slice(0, limit).map((x) => x.entry);
+}
 
 // src/tools/oxide-docs.ts
 var DOCS_PAGES = {
@@ -70314,6 +71714,16 @@ var DOCS_PAGES = {
     title: "Development Environment",
     tags: ["setup", "ide", "visual studio", "rider", "vscode", "environment", "sdk", "dotnet", "csproj"]
   },
+  publicizer: {
+    path: "/guides/developers/publicizer",
+    title: "Publicizer",
+    tags: ["publicizer", "public", "private", "reflection", "access", "decompile", "harmony"]
+  },
+  "using-decompiler": {
+    path: "/guides/developers/using-decompiler",
+    title: "Using Decompiler",
+    tags: ["decompiler", "decompile", "dnspy", "ilspy", "reflector", "reverse", "source code"]
+  },
   "target-frameworks": {
     path: "/guides/developers/target-frameworks",
     title: "Target Frameworks",
@@ -70331,7 +71741,7 @@ var DOCS_PAGES = {
     tags: ["permission", "group", "grant", "revoke", "admin", "owner", "moderator", "oxide.grant", "oxide.group"]
   },
   "configuring-plugins": {
-    path: "/guides/owners/configuring-plugins",
+    path: "/guides/owners/configure-plugins",
     title: "Configuring Plugins",
     tags: ["config", "configure", "setting", "json", "oxide/config", "server owner"]
   },
@@ -70388,15 +71798,90 @@ var DOCS_PAGES = {
     tags: ["glossary", "term", "definition", "oxide", "covalence", "extension", "plugin", "hook", "rustplugin", "covalenceplugin"]
   }
 };
+var EXTERNAL_SOURCES = [
+  // wiki.facepunch.com/rust — index and modding
+  { url: "https://wiki.facepunch.com/rust/~pagelist", title: "Rust Wiki \u2014 All Pages (1100+)", tags: ["wiki", "rust", "index", "list", "browse"], source: "wiki.facepunch.com" },
+  { url: "https://wiki.facepunch.com/rust/modding", title: "Modding (Rust Wiki)", tags: ["modding", "mod", "plugin", "development", "oxide"], source: "wiki.facepunch.com" },
+  { url: "https://wiki.facepunch.com/rust/Hooks", title: "Hooks (Rust Wiki)", tags: ["hook", "oxide", "plugin", "mod", "callback"], source: "wiki.facepunch.com" },
+  { url: "https://wiki.facepunch.com/rust/Oxide", title: "Oxide (Rust Wiki)", tags: ["oxide", "umod", "plugin", "mod", "server"], source: "wiki.facepunch.com" },
+  { url: "https://wiki.facepunch.com/rust/Modding_Overview", title: "Modding Overview", tags: ["modding", "overview", "plugin", "entity"], source: "wiki.facepunch.com" },
+  { url: "https://wiki.facepunch.com/rust/Modding_Tools", title: "Modding Tools (VS, ILSpy)", tags: ["modding", "tools", "ilspy", "decompile", "visual studio"], source: "wiki.facepunch.com" },
+  { url: "https://wiki.facepunch.com/rust/CSharp_Basics", title: "C# Basics (Rust)", tags: ["csharp", "c#", "plugin", "code", "script", "beginner"], source: "wiki.facepunch.com" },
+  { url: "https://wiki.facepunch.com/rust/Coroutines", title: "Coroutines (Rust)", tags: ["coroutine", "yield", "async", "unity", "ienumerator"], source: "wiki.facepunch.com" },
+  { url: "https://wiki.facepunch.com/rust/Entities", title: "Entities (Rust)", tags: ["entity", "prefab", "spawn", "gamemanager"], source: "wiki.facepunch.com" },
+  { url: "https://wiki.facepunch.com/rust/Protobuf", title: "Protobuf (Rust)", tags: ["protobuf", "network", "serialization"], source: "wiki.facepunch.com" },
+  { url: "https://wiki.facepunch.com/rust/Creating-a-server", title: "Creating a Server", tags: ["server", "create", "setup", "hosting", "oxide", "rcon"], source: "wiki.facepunch.com" },
+  { url: "https://wiki.facepunch.com/rust/useful_commands", title: "Useful Console Commands", tags: ["command", "console", "rcon", "server", "admin"], source: "wiki.facepunch.com" },
+  { url: "https://wiki.facepunch.com/rust/receiving-reports", title: "Receiving Player Reports", tags: ["report", "player", "convar", "api"], source: "wiki.facepunch.com" },
+  { url: "https://wiki.facepunch.com/rust/centralized-banning", title: "Centralized Banning", tags: ["ban", "banlist", "server", "admin", "api"], source: "wiki.facepunch.com" },
+  { url: "https://wiki.facepunch.com/rust/F1/console", title: "F1 Console", tags: ["console", "f1", "command", "client"], source: "wiki.facepunch.com" },
+  // GitHub (Oxide/uMod only — Carbon excluded to avoid API confusion)
+  { url: "https://github.com/OxideMod/Oxide.Rust", title: "Oxide.Rust (GitHub)", tags: ["oxide", "source", "github", "extension"], source: "github.com" },
+  { url: "https://github.com/kwamaking/rust-plugin-development", title: "Rust Plugin Development (GitHub)", tags: ["plugin", "development", "ilspy", "guide", "github"], source: "github.com" },
+  { url: "https://github.com/handcaster/rust-oxide-plugins", title: "Rust Oxide Plugins Examples", tags: ["oxide", "plugin", "example", "github"], source: "github.com" },
+  // uMod (SPA — links for manual browse, cannot be scraped)
+  { url: "https://umod.org/documentation/games/rust", title: "uMod Rust Documentation", tags: ["umod", "oxide", "documentation", "rust", "game", "rust-specific", "hooks", "api"], source: "umod.org" },
+  { url: "https://umod.org/documentation/getting-started", title: "uMod Getting Started", tags: ["umod", "getting started", "start", "beginner", "tutorial", "setup", "first", "install", "oxide"], source: "umod.org" },
+  { url: "https://umod.org/documentation/api/overview", title: "uMod API Overview", tags: ["umod", "api", "overview", "reference", "covalence", "extension", "core", "library"], source: "umod.org" },
+  { url: "https://umod.org/documentation/games/universal", title: "uMod Universal (Cross-Game)", tags: ["umod", "universal", "cross-game", "covalence", "extension", "multi-game", "7d2d", "hurtworld"], source: "umod.org" },
+  { url: "https://umod.org/plugins?page=1&sort=latest_release_at&sortdir=desc&categories=rust", title: "uMod Rust Plugins (Latest)", tags: ["umod", "plugin", "catalog", "list", "latest", "download", "rust", "plugins", "new", "release"], source: "umod.org" },
+  { url: "https://umod.org/guides/rust", title: "uMod Rust Guides", tags: ["umod", "guide", "rust", "tutorial"], source: "umod.org" }
+];
+function scoreExternalSource(ext, queryLower) {
+  const titleLower = ext.title.toLowerCase();
+  const tagsLower = ext.tags.map((t) => t.toLowerCase());
+  const isUmodQuery = queryLower.includes("umod") || queryLower.includes("plugin catalog") || queryLower.includes("getting started") || queryLower.includes("api overview") || queryLower.includes("universal");
+  const isUmodSource = ext.source === "umod.org";
+  if (titleLower.includes(queryLower)) return 8;
+  const words = queryLower.split(/\s+/).filter(Boolean);
+  let score = 0;
+  for (const w of words) {
+    if (titleLower.includes(w)) score += 4;
+    for (const tag of tagsLower) {
+      if (tag.includes(w) || w.includes(tag)) score += 3;
+    }
+  }
+  if (isUmodQuery && isUmodSource) score += 5;
+  return score;
+}
+function searchExternalSources(query, limit = 5) {
+  const q = query.toLowerCase().trim();
+  const scored = EXTERNAL_SOURCES.map((e) => ({ ext: e, score: scoreExternalSource(e, q) })).filter((x) => x.score > 0);
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit).map((x) => x.ext);
+}
+async function fetchAndParseWiki(url) {
+  if (!url.includes("wiki.facepunch.com")) return null;
+  const cacheKey2 = `wiki_${url.replace(/[^a-z0-9]/gi, "_")}`;
+  const cached2 = await getCached("wiki", cacheKey2);
+  if (cached2) {
+    try {
+      return JSON.parse(cached2);
+    } catch {
+    }
+  }
+  try {
+    const html3 = await fetchExternalUrl(url);
+    const doc = parseWikiPage(html3, url);
+    const result = { title: doc.title, content: doc.content, url: doc.url };
+    await setCache("wiki", cacheKey2, JSON.stringify(result));
+    return result;
+  } catch {
+    return null;
+  }
+}
 var UMOD_LINKS = {
-  "rust-docs": { url: "https://umod.org/documentation/games/rust", description: "Rust-specific uMod documentation" },
+  "rust-docs": { url: "https://umod.org/documentation/games/rust", description: "Rust-specific uMod documentation (hooks, API)" },
+  "getting-started": { url: "https://umod.org/documentation/getting-started", description: "uMod Getting Started (setup, first plugin)" },
+  "api-overview": { url: "https://umod.org/documentation/api/overview", description: "uMod API Overview (Covalence, extensions)" },
   "universal-docs": { url: "https://umod.org/documentation/games/universal", description: "Universal (cross-game) uMod documentation" },
-  "rust-plugins": { url: "https://umod.org/plugins?categories=rust", description: "Browse existing Rust plugins on uMod" },
+  "rust-plugins-latest": { url: "https://umod.org/plugins?page=1&sort=latest_release_at&sortdir=desc&categories=rust", description: "Rust plugins catalog (latest releases)" },
+  "rust-plugins": { url: "https://umod.org/plugins?categories=rust", description: "Rust plugins catalog (all)" },
   "rust-guides": { url: "https://umod.org/guides/rust", description: "Rust modding guides on uMod" },
   "rust-community": { url: "https://umod.org/community/rust", description: "Rust modding community forum on uMod" }
 };
 async function getLiveHooksIndex() {
-  const cached2 = await getCached("hooks_index", "full");
+  const cached2 = await getCached("hooks_index", "v2_full");
   if (cached2) {
     try {
       return JSON.parse(cached2);
@@ -70410,8 +71895,21 @@ async function getLiveHooksIndex() {
     category: e.category,
     signature: void 0
   }));
-  await setCache("hooks_index", "full", JSON.stringify(result));
+  await setCache("hooks_index", "v2_full", JSON.stringify(result));
   return result;
+}
+async function getLiveGuidesIndex() {
+  const cached2 = await getCached("guides_index", "v1_full");
+  if (cached2) {
+    try {
+      return JSON.parse(cached2);
+    } catch {
+    }
+  }
+  const html3 = await fetchPage("/guides/");
+  const entries = parseGuidesIndexFull(html3);
+  await setCache("guides_index", "v1_full", JSON.stringify(entries));
+  return entries;
 }
 function scoreMatch(page, queryLower) {
   const words = queryLower.split(/\s+/).filter(Boolean);
@@ -70450,6 +71948,42 @@ function findBestPages(query, limit = 3) {
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, limit);
 }
+function scoreGuideMatch(guide, queryLower) {
+  const titleLower = guide.title.toLowerCase();
+  const pathLower = guide.path.toLowerCase();
+  if (titleLower.includes(queryLower)) return 10;
+  if (queryLower.includes(titleLower) && titleLower.length > 3) return 8;
+  const words = queryLower.split(/\s+/).filter(Boolean);
+  let score = 0;
+  for (const w of words) {
+    if (titleLower.includes(w)) score += 5;
+    if (pathLower.includes(w)) score += 2;
+  }
+  return score;
+}
+async function findMergedGuides(query, limit) {
+  const queryLower = query.toLowerCase().trim();
+  const staticMatches = findBestPages(query, limit);
+  const liveGuides = await getLiveGuidesIndex();
+  const liveScored = liveGuides.map((g) => ({ guide: g, score: scoreGuideMatch(g, queryLower) })).filter((x) => x.score > 0).sort((a, b) => b.score - a.score).slice(0, limit);
+  const seen = /* @__PURE__ */ new Set();
+  const merged = [];
+  for (const m of staticMatches) {
+    const p = m.page.path.replace(/\/$/, "");
+    if (!seen.has(p)) {
+      seen.add(p);
+      merged.push({ key: m.key, page: m.page, path: m.page.path, title: m.page.title });
+    }
+  }
+  for (const { guide } of liveScored) {
+    const p = guide.path.replace(/\/$/, "");
+    if (!seen.has(p)) {
+      seen.add(p);
+      merged.push({ guide, path: guide.path, title: guide.title });
+    }
+  }
+  return merged.slice(0, limit);
+}
 function registerOxideDocsTools(server2) {
   server2.tool(
     "rust_docs_search_hook",
@@ -70469,22 +72003,47 @@ function registerOxideDocsTools(server2) {
           (w) => nameLower.includes(w) || categoryLower.includes(w)
         );
       };
-      let results = HOOKS_INDEX.filter(matchHook).slice(0, 20);
+      const liveIndex = await getLiveHooksIndex();
+      const localByKey = new Map(
+        HOOKS_INDEX.map((h) => [`${h.category}:${h.name}`, h])
+      );
+      let results = liveIndex.filter(matchHook).slice(0, 20).map((h) => {
+        const local = localByKey.get(`${h.category}:${h.name}`);
+        return local || h;
+      });
       if (results.length === 0) {
-        const liveIndex = await getLiveHooksIndex();
-        const localByKey = new Map(
-          HOOKS_INDEX.map((h) => [`${h.category}:${h.name}`, h])
-        );
-        results = liveIndex.filter(matchHook).slice(0, 20).map((h) => {
-          const local = localByKey.get(`${h.category}:${h.name}`);
-          return local || h;
-        });
-      }
-      if (results.length === 0) {
+        const guidesFallback = await findMergedGuides(query, 3);
+        const external = searchExternalSources(query, 5);
+        const wikiSources = external.filter((e) => e.source === "wiki.facepunch.com");
+        let wikiContent = "";
+        if (wikiSources.length > 0) {
+          const parsed = await fetchAndParseWiki(wikiSources[0].url);
+          if (parsed && parsed.content.length > 50) {
+            wikiContent = `
+
+## From Rust Wiki (${parsed.title})
+Source: ${parsed.url}
+
+${parsed.content}`;
+          }
+        }
+        let fallback = "";
+        if (guidesFallback.length > 0) {
+          fallback += `
+
+## Maybe in guides?
+${guidesFallback.map((g) => `- [${g.title}](https://docs.oxidemod.com${g.path})`).join("\n")}`;
+        }
+        if (external.length > 0) {
+          fallback += `
+
+## Other sources
+${external.map((e) => `- [${e.title}](${e.url})`).join("\n")}`;
+        }
         return {
           content: [{
             type: "text",
-            text: `No hooks found matching "${query}". Try broader terms like "player", "entity", "item", "build", "npc". Full hook index: https://docs.oxidemod.com/hooks/`
+            text: `No hooks found matching "${query}". Try broader terms like "player", "entity", "item", "build", "npc". Full hook index: https://docs.oxidemod.com/hooks/${wikiContent}${fallback}`
           }]
         };
       }
@@ -70497,6 +72056,93 @@ function registerOxideDocsTools(server2) {
 ${output}
 
 Use rust_docs_get_hook(category, hook_name) for full documentation, example code, and source context.`
+        }]
+      };
+    }
+  );
+  server2.tool(
+    "rust_docs_search",
+    "Search Oxide documentation across ALL sources: hooks (700+) and guides/API. Returns both matching hooks and guide pages. Use when the topic could be a hook, a guide, or both (e.g. 'phone', 'timer', 'database', 'CUI').",
+    {
+      query: external_exports.string().describe('Search query (e.g. "phone", "timer", "database", "CUI", "mysql", "publicizer")'),
+      limit: external_exports.number().optional().default(10).describe("Max hooks to return (default 10)")
+    },
+    async ({ query, limit }) => {
+      const queryLower = query.toLowerCase().replace(/\s+/g, "");
+      const queryWords = query.toLowerCase().split(/\s+/).filter(Boolean);
+      const matchHook = (hook) => {
+        const nameLower = hook.name.toLowerCase();
+        const categoryLower = hook.category.toLowerCase();
+        if (nameLower.includes(queryLower)) return true;
+        if (categoryLower.includes(queryLower)) return true;
+        return queryWords.every(
+          (w) => nameLower.includes(w) || categoryLower.includes(w)
+        );
+      };
+      const [hooks, guides] = await Promise.all([
+        getLiveHooksIndex(),
+        getLiveGuidesIndex()
+      ]);
+      const hookResults = hooks.filter(matchHook).slice(0, limit);
+      const localByKey = new Map(
+        HOOKS_INDEX.map((h) => [`${h.category}:${h.name}`, h])
+      );
+      const enrichedHooks = hookResults.map((h) => {
+        const local = localByKey.get(`${h.category}:${h.name}`);
+        return local || h;
+      });
+      const queryLowerTitle = query.toLowerCase().trim();
+      const guideResults = guides.filter((g) => scoreGuideMatch(g, queryLowerTitle) > 0).slice(0, 5);
+      const parts = [];
+      if (enrichedHooks.length > 0) {
+        parts.push(
+          `## Hooks (${enrichedHooks.length})`,
+          enrichedHooks.map(
+            (h) => `- ${h.name} [${h.category}] \u2014 ${h.signature || "rust_docs_get_hook for details"}`
+          ).join("\n")
+        );
+      }
+      if (guideResults.length > 0) {
+        parts.push(
+          "",
+          "## Guides / API",
+          guideResults.map((g) => `- [${g.title}](https://docs.oxidemod.com${g.path})`).join("\n")
+        );
+      }
+      if (parts.length === 0) {
+        const external = searchExternalSources(query, 5);
+        const wikiSources = external.filter((e) => e.source === "wiki.facepunch.com");
+        let wikiContent = "";
+        if (wikiSources.length > 0) {
+          const parsed = await fetchAndParseWiki(wikiSources[0].url);
+          if (parsed && parsed.content.length > 50) {
+            wikiContent = `
+
+## From Rust Wiki (${parsed.title})
+Source: ${parsed.url}
+
+${parsed.content}`;
+          }
+        }
+        const fallback = external.length > 0 ? `
+
+## Other sources
+${external.map((e) => `- [${e.title}](${e.url})`).join("\n")}` : "";
+        return {
+          content: [{
+            type: "text",
+            text: `No results for "${query}". Try: rust_docs_search_hook for hooks only, rust_docs_search_api for guides only. Full index: https://docs.oxidemod.com/hooks/${wikiContent}${fallback}`
+          }]
+        };
+      }
+      return {
+        content: [{
+          type: "text",
+          text: `# Search: ${query}
+
+${parts.join("\n")}
+
+Use rust_docs_get_hook(category, hook_name) for hook details, or rust_docs_search_api for full guide content.`
         }]
       };
     }
@@ -70566,10 +72212,41 @@ Note: docs.oxidemod.com = developer reference; umod.org = plugin catalog and com
       query: external_exports.string().describe('Topic to search (e.g. "timers", "CUI button", "web request", "database mysql", "permissions", "coroutines", "data storage", "plugin lifecycle", "config")')
     },
     async ({ query }) => {
-      const matches = findBestPages(query);
+      const matches = await findMergedGuides(query, 5);
       if (matches.length === 0) {
+        const hooksFallback = (await getLiveHooksIndex()).filter((h) => {
+          const ql = query.toLowerCase().replace(/\s+/g, "");
+          return h.name.toLowerCase().includes(ql) || h.category.toLowerCase().includes(ql);
+        }).slice(0, 5);
+        const external = searchExternalSources(query, 5);
+        const wikiSources = external.filter((e) => e.source === "wiki.facepunch.com");
+        let wikiContent = "";
+        if (wikiSources.length > 0) {
+          const parsed = await fetchAndParseWiki(wikiSources[0].url);
+          if (parsed && parsed.content.length > 50) {
+            wikiContent = `
+
+## From Rust Wiki (${parsed.title})
+Source: ${parsed.url}
+
+${parsed.content}`;
+          }
+        }
         const available = Object.values(DOCS_PAGES).map((p) => p.title).join(", ");
         const umodLinks = Object.values(UMOD_LINKS).map((l) => `- ${l.description}: ${l.url}`).join("\n");
+        let fallback = "";
+        if (hooksFallback.length > 0) {
+          fallback += `
+
+## Maybe hooks?
+${hooksFallback.map((h) => `- ${h.name} [${h.category}] \u2014 use rust_docs_get_hook("${h.category}", "${h.name}")`).join("\n")}`;
+        }
+        if (external.length > 0) {
+          fallback += `
+
+## Other sources
+${external.map((e) => `- [${e.title}](${e.url})`).join("\n")}`;
+        }
         return {
           content: [{
             type: "text",
@@ -70579,16 +72256,15 @@ Available topics on docs.oxidemod.com:
 ${available}
 
 uMod resources (browse manually):
-${umodLinks}`
+${umodLinks}${wikiContent}${fallback}`
           }]
         };
       }
       const best = matches[0];
-      const cached2 = await getCached("api", best.key);
+      const cacheKey2 = best.key ?? best.path.replace(/\//g, "_").replace(/^_/, "");
+      const alsoSee = matches.slice(1).map((m) => `- ${m.title}: https://docs.oxidemod.com${m.path}`).join("\n");
+      const cached2 = await getCached("api", cacheKey2);
       if (cached2) {
-        const alsoSee = matches.slice(1).map(
-          (m) => `- ${m.page.title}: https://docs.oxidemod.com${m.page.path}`
-        ).join("\n");
         return {
           content: [{
             type: "text",
@@ -70600,8 +72276,8 @@ ${alsoSee}` : "")
         };
       }
       try {
-        const html3 = await fetchPage(best.page.path);
-        const doc = parseApiPage(html3, `https://docs.oxidemod.com${best.page.path}`);
+        const html3 = await fetchPage(best.path);
+        const doc = parseApiPage(html3, `https://docs.oxidemod.com${best.path}`);
         const output = [
           `# ${doc.title}`,
           `Source: ${doc.url}`,
@@ -70612,10 +72288,7 @@ ${alsoSee}` : "")
 ${ex}
 \`\`\``).join("\n\n") : ""
         ].filter(Boolean).join("\n");
-        await setCache("api", best.key, output);
-        const alsoSee = matches.slice(1).map(
-          (m) => `- ${m.page.title}: https://docs.oxidemod.com${m.page.path}`
-        ).join("\n");
+        await setCache("api", cacheKey2, output);
         return {
           content: [{
             type: "text",
@@ -70644,7 +72317,7 @@ Try browsing: https://docs.oxidemod.com/guides/`
       pattern: external_exports.string().describe('Pattern to find examples (e.g. "timer cleanup", "CUI button", "mysql query", "permission check", "protobuf save", "web request POST", "coroutine yield")')
     },
     async ({ pattern }) => {
-      const matches = findBestPages(pattern, 4);
+      const matches = await findMergedGuides(pattern, 4);
       if (matches.length === 0) {
         return {
           content: [{
@@ -70655,15 +72328,16 @@ Try browsing: https://docs.oxidemod.com/guides/`
       }
       const allExamples = [];
       for (const match of matches) {
-        const cached2 = await getCached("api", match.key);
+        const cacheKey2 = match.key ?? match.path.replace(/\//g, "_").replace(/^_/, "");
+        const cached2 = await getCached("api", cacheKey2);
         if (cached2) {
-          allExamples.push(`--- ${match.page.title} ---
+          allExamples.push(`--- ${match.title} ---
 ${cached2}`);
           continue;
         }
         try {
-          const html3 = await fetchPage(match.page.path);
-          const doc = parseApiPage(html3, `https://docs.oxidemod.com${match.page.path}`);
+          const html3 = await fetchPage(match.path);
+          const doc = parseApiPage(html3, `https://docs.oxidemod.com${match.path}`);
           if (doc.codeExamples.length > 0) {
             const examplesText = doc.codeExamples.slice(0, 6).map((ex) => `\`\`\`csharp
 ${ex}
@@ -70679,16 +72353,21 @@ ${examplesText}`;
               "",
               "## Code Examples\n" + examplesText
             ].filter(Boolean).join("\n");
-            await setCache("api", match.key, output);
+            await setCache("api", cacheKey2, output);
           }
         } catch {
         }
       }
       if (allExamples.length === 0) {
+        const external = searchExternalSources(pattern, 4);
+        const fallback = external.length > 0 ? `
+
+## Other sources
+${external.map((e) => `- [${e.title}](${e.url})`).join("\n")}` : "";
         return {
           content: [{
             type: "text",
-            text: `No examples found for "${pattern}". Browse examples at https://docs.oxidemod.com/guides/developers/my-first-plugin`
+            text: `No examples found for "${pattern}". Browse examples at https://docs.oxidemod.com/guides/developers/my-first-plugin${fallback}`
           }]
         };
       }
@@ -70703,6 +72382,114 @@ ${allExamples.join("\n\n")}`
     }
   );
   server2.tool(
+    "rust_docs_fetch_wiki",
+    `Fetch and parse a page from Rust Wiki (wiki.facepunch.com/rust). Use for Entities, Animals, Hooks, Modding, CSharp_Basics, Coroutines, Protobuf, items (Clan Table, 8x Zoom Scope), etc. Returns full parsed content.`,
+    {
+      page: external_exports.string().describe('Wiki page name or path (e.g. "Entities", "Animals", "Hooks", "Clan Table", "8x Zoom Scope")')
+    },
+    async ({ page }) => {
+      const url = resolveWikiUrl(page) ?? (page.trim().startsWith("http") ? page.trim() : `https://wiki.facepunch.com/rust/${page.trim().replace(/\s+/g, "_")}`);
+      if (!url.includes("wiki.facepunch.com")) {
+        return {
+          content: [{
+            type: "text",
+            text: `Only wiki.facepunch.com/rust pages are supported. Use rust_docs_search_wiki to find pages.`
+          }]
+        };
+      }
+      const parsed = await fetchAndParseWiki(url);
+      if (!parsed) {
+        return {
+          content: [{
+            type: "text",
+            text: `Failed to fetch ${url}. Check page name at https://wiki.facepunch.com/rust/~pagelist`
+          }]
+        };
+      }
+      return {
+        content: [{
+          type: "text",
+          text: `# ${parsed.title}
+Source: ${parsed.url}
+
+${parsed.content}`
+        }]
+      };
+    }
+  );
+  server2.tool(
+    "rust_docs_search_wiki",
+    "Search Rust Wiki (wiki.facepunch.com/rust) by keyword. Returns matching pages from sidebar: categories (Hooks, Modding, Entities), items (Clan Table, 8x Zoom Scope, AK, etc). Use rust_docs_fetch_wiki to fetch a page.",
+    {
+      query: external_exports.string().describe('Search query (e.g. "AK", "cupboard", "hook", "clan table", "8x scope")'),
+      limit: external_exports.number().optional().default(10).describe("Max results (default 10)")
+    },
+    async ({ query, limit }) => {
+      const results = searchWikiPages(query, limit);
+      if (results.length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: `No wiki pages found for "${query}". Try broader terms. Browse: https://wiki.facepunch.com/rust/~pagelist`
+          }]
+        };
+      }
+      const base = "https://wiki.facepunch.com/rust/";
+      const lines = results.map((e) => `- [${e.title}](${base}${e.address})`);
+      return {
+        content: [{
+          type: "text",
+          text: `# Wiki search: ${query}
+
+${lines.join("\n")}
+
+Use rust_docs_fetch_wiki(page) to fetch content.`
+        }]
+      };
+    }
+  );
+  server2.tool(
+    "rust_docs_fetch_umod",
+    `Try to fetch umod.org documentation page. umod is SPA \u2014 often times out; use as fallback. Pages: documentation/games/rust, documentation/getting-started, documentation/api/overview.`,
+    {
+      path: external_exports.string().describe('Path (e.g. "documentation/games/rust", "documentation/getting-started")')
+    },
+    async ({ path: path11 }) => {
+      const pathClean = path11.replace(/^\/+/, "").trim();
+      const url = pathClean.startsWith("http") ? pathClean : `https://umod.org/${pathClean}`;
+      if (!url.includes("umod.org")) {
+        return {
+          content: [{
+            type: "text",
+            text: "Only umod.org pages supported. Example: documentation/games/rust"
+          }]
+        };
+      }
+      try {
+        const html3 = await fetchExternalUrl(url);
+        const doc = parseUmodPage(html3, url);
+        return {
+          content: [{
+            type: "text",
+            text: `# ${doc.title}
+Source: ${doc.url}
+
+${doc.content}`
+          }]
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{
+            type: "text",
+            text: `uMod fetch failed (SPA/timeout): ${msg}
+Open in browser: ${url}`
+          }]
+        };
+      }
+    }
+  );
+  server2.tool(
     "rust_docs_browse",
     `List all available documentation resources for Oxide/uMod plugin development.
 Returns links to docs.oxidemod.com (developer reference, hooks, API) and umod.org (plugin catalog, community, Rust-specific docs).
@@ -70714,6 +72501,9 @@ Use when you need to find what documentation exists or direct the user to specif
       );
       const umodPages = Object.entries(UMOD_LINKS).map(
         ([, link]) => `- [${link.description}](${link.url})`
+      );
+      const externalPages = EXTERNAL_SOURCES.slice(0, 18).map(
+        (e) => `- [${e.title}](${e.url})`
       );
       const hookCategories = [...new Set(HOOKS_INDEX.map((h) => h.category))];
       const output = [
@@ -70741,8 +72531,13 @@ Use when you need to find what documentation exists or direct the user to specif
           return key.startsWith("lib-") || key.startsWith("cmd-");
         }),
         "",
-        "## umod.org \u2014 Plugin Catalog & Community",
-        "Browse plugins, community discussions, and Rust-specific guides. These pages require a browser.",
+        "## wiki.facepunch.com, GitHub, uMod (Oxide only)",
+        "Rust Wiki (modding, hooks, C#), GitHub examples, uMod catalog. Oxide/uMod only \u2014 no Carbon. Use rust_docs_search_wiki to search 500+ sidebar pages (categories + items), rust_docs_fetch_wiki to fetch content.",
+        "",
+        ...externalPages,
+        "",
+        "## umod.org \u2014 Documentation & Plugin Catalog",
+        "Key pages (SPA \u2014 open in browser): documentation/games/rust, getting-started, api/overview, games/universal, plugins (latest).",
         "",
         ...umodPages
       ].join("\n");
