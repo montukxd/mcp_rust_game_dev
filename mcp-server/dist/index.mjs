@@ -69791,6 +69791,11 @@ var undici = __toESM(require_undici(), 1);
 var import_whatwg_mimetype = __toESM(require_mime_type(), 1);
 
 // src/docs/parser.ts
+var HOOK_SIG_REGEX = /(?:private\s+)?(?:void|object|bool|string|int|float|Item|BasePlayer|BaseEntity|BaseCombatEntity)\s+\w+\s*\([^)]*\)/;
+function looksLikeHookExample(code, hookName) {
+  const nameLower = hookName.toLowerCase();
+  return code.includes(hookName) || code.toLowerCase().includes(nameLower);
+}
 function parseHookPage(html3, hookName, category) {
   const $2 = load(html3);
   let signature = "";
@@ -69800,10 +69805,15 @@ function parseHookPage(html3, hookName, category) {
   let sourceCode = "";
   const $doc = $2(".vp-doc").first();
   const scope = $doc.length ? $doc : $2("main").first().length ? $2("main").first() : $2("body");
+  const allCodeBlocks = [];
+  scope.find("pre code, div[class*='language'] code").each((_, el) => {
+    const code = $2(el).text().trim();
+    if (code.length > 15) allCodeBlocks.push(code);
+  });
+  const fullDocText = scope.clone().find("pre, code").replaceWith("<placeholder/>").end().text().replace(/\s+/g, " ").trim().substring(0, 4e3);
   const getSectionContent = (header) => {
     const parts = [];
     header.nextUntil("h2").each((_, el) => {
-      const tag = el.tagName;
       const text3 = $2(el).text().trim();
       if (text3) parts.push(text3);
     });
@@ -69816,35 +69826,31 @@ function parseHookPage(html3, hookName, category) {
     if (title.includes("usage") && content) {
       returnBehavior = content;
     } else if (title.includes("example") && !exampleCode) {
-      const $codeBlock = $h2.nextAll("pre, div[class*='language']").first();
+      const $codeBlock = $h2.nextUntil("h2").find("pre code, div[class*='language'] code").first();
       if ($codeBlock.length) {
-        exampleCode = $codeBlock.find("code").text().trim() || $codeBlock.find("pre").text().trim() || $codeBlock.text().trim();
-        const sigMatch = exampleCode.match(
-          /(?:private\s+)?(?:void|object|bool|string|int|float|Item|BasePlayer|BaseEntity)\s+\w+\s*\([^)]*\)/
-        );
+        exampleCode = $codeBlock.text().trim();
+        const sigMatch = exampleCode.match(HOOK_SIG_REGEX);
         if (sigMatch) signature = sigMatch[0];
       }
     } else if (title.includes("location") && content) {
       location = content;
     }
   });
-  if (!exampleCode) {
-    const firstCode = scope.find("pre code").first();
-    if (firstCode.length) {
-      exampleCode = firstCode.text().trim();
-      const sigMatch = exampleCode.match(
-        /(?:private\s+)?(?:void|object|bool|string|int|float|Item|BasePlayer|BaseEntity)\s+\w+\s*\([^)]*\)/
-      );
+  if (!exampleCode && allCodeBlocks.length > 0) {
+    const withHook = allCodeBlocks.find((c) => looksLikeHookExample(c, hookName));
+    exampleCode = withHook || allCodeBlocks[0];
+    if (!signature) {
+      const sigMatch = exampleCode.match(HOOK_SIG_REGEX);
       if (sigMatch) signature = sigMatch[0];
     }
   }
-  const allPres = scope.find("pre");
-  if (allPres.length > 1) {
-    const lastPre = $2(allPres[allPres.length - 1]);
-    const code = lastPre.find("code").text().trim() || lastPre.text().trim();
-    if (code.length > 20 && code !== exampleCode) {
-      sourceCode = code;
-    }
+  if (!returnBehavior && fullDocText) {
+    const usageMatch = fullDocText.match(/return\s+(?:a\s+)?(?:non-?null|non-?null\s+value)[^.]*\./i);
+    if (usageMatch) returnBehavior = usageMatch[0].trim();
+  }
+  if (allCodeBlocks.length > 1) {
+    const lastCode = allCodeBlocks[allCodeBlocks.length - 1];
+    if (lastCode.length > 20 && lastCode !== exampleCode) sourceCode = lastCode;
   }
   return {
     name: hookName,
@@ -69853,7 +69859,9 @@ function parseHookPage(html3, hookName, category) {
     returnBehavior: returnBehavior || "No return behavior documented",
     exampleCode,
     location,
-    sourceCode
+    sourceCode,
+    allCodeBlocks,
+    fullDocText
   };
 }
 function parseApiPage(html3, url) {
@@ -70455,7 +70463,7 @@ Use rust_docs_get_hook(category, hook_name) for full documentation, example code
       hook_name: external_exports.string().describe("Exact hook name (e.g. OnPlayerConnected, OnEntitySpawned, CanBuild)")
     },
     async ({ category, hook_name }) => {
-      const cacheKey2 = `${category}_${hook_name}`;
+      const cacheKey2 = `v2_${category}_${hook_name}`;
       const cached2 = await getCached("hooks", cacheKey2);
       if (cached2) {
         return { content: [{ type: "text", text: cached2 }] };
@@ -70464,7 +70472,8 @@ Use rust_docs_get_hook(category, hook_name) for full documentation, example code
         const urlPath = `/hooks/${category.toLowerCase()}/${hook_name}`;
         const html3 = await fetchPage(urlPath);
         const doc = parseHookPage(html3, hook_name, category);
-        const output = [
+        const exampleSection = doc.exampleCode || doc.allCodeBlocks.find((c) => c.toLowerCase().includes(hook_name.toLowerCase())) || doc.allCodeBlocks[0];
+        const sections = [
           `# ${doc.name}`,
           `Category: ${doc.category}`,
           `Signature: ${doc.signature}`,
@@ -70473,7 +70482,7 @@ Use rust_docs_get_hook(category, hook_name) for full documentation, example code
           "",
           "## Example",
           "```csharp",
-          doc.exampleCode || "// No example available",
+          exampleSection || "// No example available",
           "```",
           "",
           doc.location ? `## Location
@@ -70482,7 +70491,11 @@ ${doc.location}` : "",
 \`\`\`csharp
 ${doc.sourceCode}
 \`\`\`` : ""
-        ].filter(Boolean).join("\n");
+        ];
+        if (!exampleSection && doc.fullDocText) {
+          sections.push("", "## Page Content", doc.fullDocText);
+        }
+        const output = sections.filter(Boolean).join("\n");
         await setCache("hooks", cacheKey2, output);
         return { content: [{ type: "text", text: output }] };
       } catch (err) {
