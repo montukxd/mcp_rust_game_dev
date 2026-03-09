@@ -69900,6 +69900,23 @@ function parseApiPage(html3, url) {
     codeExamples
   };
 }
+function parseHooksIndexFull(html3) {
+  const $2 = load(html3);
+  const seen = /* @__PURE__ */ new Set();
+  const result = [];
+  $2("a[href*='/hooks/']").each((_, el) => {
+    const href = $2(el).attr("href") || "";
+    const m = href.match(/\/hooks\/(\w+)\/(\w+)/);
+    if (m) {
+      const key = `${m[1]}:${m[2]}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        result.push({ category: m[1].toLowerCase(), name: m[2] });
+      }
+    }
+  });
+  return result;
+}
 
 // src/docs/cache.ts
 import fs5 from "fs/promises";
@@ -70378,6 +70395,24 @@ var UMOD_LINKS = {
   "rust-guides": { url: "https://umod.org/guides/rust", description: "Rust modding guides on uMod" },
   "rust-community": { url: "https://umod.org/community/rust", description: "Rust modding community forum on uMod" }
 };
+async function getLiveHooksIndex() {
+  const cached2 = await getCached("hooks_index", "full");
+  if (cached2) {
+    try {
+      return JSON.parse(cached2);
+    } catch {
+    }
+  }
+  const html3 = await fetchPage("/hooks/");
+  const entries = parseHooksIndexFull(html3);
+  const result = entries.map((e) => ({
+    name: e.name,
+    category: e.category,
+    signature: void 0
+  }));
+  await setCache("hooks_index", "full", JSON.stringify(result));
+  return result;
+}
 function scoreMatch(page, queryLower) {
   const words = queryLower.split(/\s+/).filter(Boolean);
   let score = 0;
@@ -70420,20 +70455,31 @@ function registerOxideDocsTools(server2) {
     "rust_docs_search_hook",
     "Search Oxide hooks by keyword. Returns matching hooks from the 700+ hook index with categories and signatures. Use this first to find which hooks exist, then rust_docs_get_hook for full details.",
     {
-      query: external_exports.string().describe('Hook name or keyword (e.g. "player connected", "entity spawn", "item craft", "building")')
+      query: external_exports.string().describe('Hook name or keyword (e.g. "player connected", "entity spawn", "item craft", "building", "OnWildlifeTrap")')
     },
     async ({ query }) => {
       const queryLower = query.toLowerCase().replace(/\s+/g, "");
-      const results = HOOKS_INDEX.filter((hook) => {
+      const queryWords = query.toLowerCase().split(/\s+/).filter(Boolean);
+      const matchHook = (hook) => {
         const nameLower = hook.name.toLowerCase();
         const categoryLower = hook.category.toLowerCase();
         if (nameLower.includes(queryLower)) return true;
         if (categoryLower.includes(queryLower)) return true;
-        const queryWords = query.toLowerCase().split(/\s+/);
         return queryWords.every(
           (w) => nameLower.includes(w) || categoryLower.includes(w)
         );
-      }).slice(0, 20);
+      };
+      let results = HOOKS_INDEX.filter(matchHook).slice(0, 20);
+      if (results.length === 0) {
+        const liveIndex = await getLiveHooksIndex();
+        const localByKey = new Map(
+          HOOKS_INDEX.map((h) => [`${h.category}:${h.name}`, h])
+        );
+        results = liveIndex.filter(matchHook).slice(0, 20).map((h) => {
+          const local = localByKey.get(`${h.category}:${h.name}`);
+          return local || h;
+        });
+      }
       if (results.length === 0) {
         return {
           content: [{
