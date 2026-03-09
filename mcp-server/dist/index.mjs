@@ -69798,39 +69798,44 @@ function parseHookPage(html3, hookName, category) {
   let exampleCode = "";
   let location = "";
   let sourceCode = "";
-  const $doc = $2(".vp-doc, .content, main, article").first();
-  const scope = $doc.length ? $doc : $2("body");
-  const usageHeader = scope.find("h2").filter(
-    (_, el) => $2(el).text().toLowerCase().includes("usage")
-  );
-  if (usageHeader.length) {
-    const usageContent = usageHeader.next("ul, p");
-    if (usageContent.length) {
-      returnBehavior = usageContent.text().trim();
+  const $doc = $2(".vp-doc").first();
+  const scope = $doc.length ? $doc : $2("main").first().length ? $2("main").first() : $2("body");
+  const getSectionContent = (header) => {
+    const parts = [];
+    header.nextUntil("h2").each((_, el) => {
+      const tag = el.tagName;
+      const text3 = $2(el).text().trim();
+      if (text3) parts.push(text3);
+    });
+    return parts.join(" ").trim();
+  };
+  scope.find("h2").each((_, el) => {
+    const $h2 = $2(el);
+    const title = $h2.text().toLowerCase();
+    const content = getSectionContent($h2);
+    if (title.includes("usage") && content) {
+      returnBehavior = content;
+    } else if (title.includes("example") && !exampleCode) {
+      const $codeBlock = $h2.nextAll("pre, div[class*='language']").first();
+      if ($codeBlock.length) {
+        exampleCode = $codeBlock.find("code").text().trim() || $codeBlock.find("pre").text().trim() || $codeBlock.text().trim();
+        const sigMatch = exampleCode.match(
+          /(?:private\s+)?(?:void|object|bool|string|int|float|Item|BasePlayer|BaseEntity)\s+\w+\s*\([^)]*\)/
+        );
+        if (sigMatch) signature = sigMatch[0];
+      }
+    } else if (title.includes("location") && content) {
+      location = content;
     }
-  }
-  const exampleHeader = scope.find("h2").filter(
-    (_, el) => $2(el).text().toLowerCase().includes("example")
-  );
-  if (exampleHeader.length) {
-    const examplePre = exampleHeader.nextAll("pre, div.language-csharp").first();
-    if (examplePre.length) {
-      exampleCode = examplePre.find("code").text().trim() || examplePre.text().trim();
+  });
+  if (!exampleCode) {
+    const firstCode = scope.find("pre code").first();
+    if (firstCode.length) {
+      exampleCode = firstCode.text().trim();
       const sigMatch = exampleCode.match(
         /(?:private\s+)?(?:void|object|bool|string|int|float|Item|BasePlayer|BaseEntity)\s+\w+\s*\([^)]*\)/
       );
-      if (sigMatch) {
-        signature = sigMatch[0];
-      }
-    }
-  }
-  const locationHeader = scope.find("h2").filter(
-    (_, el) => $2(el).text().toLowerCase().includes("location")
-  );
-  if (locationHeader.length) {
-    const locationContent = locationHeader.next("ul, p");
-    if (locationContent.length) {
-      location = locationContent.text().trim();
+      if (sigMatch) signature = sigMatch[0];
     }
   }
   const allPres = scope.find("pre");
@@ -69855,8 +69860,8 @@ function parseApiPage(html3, url) {
   const $2 = load(html3);
   const title = $2("h1").first().text().trim().replace(/\s*​\s*$/, "");
   $2("nav, header, footer, .sidebar, .VPNav, .VPSidebar, .VPFooter, .VPDocFooter").remove();
-  const $doc = $2(".vp-doc, .content, main, article").first();
-  const contentRoot = $doc.length ? $doc : $2("body");
+  const $doc = $2(".vp-doc").first();
+  const contentRoot = $doc.length ? $doc : $2("main").first().length ? $2("main").first() : $2("body");
   const textParts = [];
   contentRoot.find("h1, h2, h3, h4, p, li, td, th, blockquote").each((_, el) => {
     const tag = el.tagName;
@@ -70731,7 +70736,12 @@ var PluginFileWatcher = class {
               };
               this._lastEvent = event;
               for (const cb of this.callbacks) {
-                cb(event);
+                const p = cb(event);
+                if (p && typeof p.catch === "function") {
+                  p.catch(
+                    (err) => console.error("[rust-oxide-dev] Watcher callback error:", err)
+                  );
+                }
               }
             }, DEBOUNCE_MS)
           );
@@ -72805,6 +72815,12 @@ Fix: Call permission.RegisterPermission() in Init()
 `;
 
 // src/index.ts
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("[rust-oxide-dev] Unhandled rejection:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[rust-oxide-dev] Uncaught exception:", err);
+});
 var server = new McpServer({
   name: "rust-oxide-dev",
   version: "1.0.0"
