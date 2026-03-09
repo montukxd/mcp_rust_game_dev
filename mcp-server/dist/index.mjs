@@ -54694,9 +54694,324 @@ async function deployPlugin(sourceFile, pluginName, mode) {
   }
 }
 
-// src/tools/plugin-push.ts
+// src/tools/runtime-errors.ts
 import fs2 from "fs/promises";
 import path2 from "path";
+var RUNTIME_ERROR_PATTERNS = [
+  // NullReferenceException
+  /(?:NullReferenceException|NRE):\s*(.+)/,
+  // ArgumentException
+  /ArgumentException:\s*(.+)/,
+  // ArgumentNullException
+  /ArgumentNullException:\s*(.+)/,
+  // ArgumentOutOfRangeException
+  /ArgumentOutOfRangeException:\s*(.+)/,
+  // InvalidOperationException
+  /InvalidOperationException:\s*(.+)/,
+  // IndexOutOfRangeException
+  /IndexOutOfRangeException:\s*(.+)/,
+  // KeyNotFoundException
+  /KeyNotFoundException:\s*(.+)/,
+  // InvalidCastException
+  /InvalidCastException:\s*(.+)/,
+  // FormatException
+  /FormatException:\s*(.+)/,
+  // OverflowException
+  /OverflowException:\s*(.+)/,
+  // ObjectDisposedException
+  /ObjectDisposedException:\s*(.+)/,
+  // Generic Exception
+  /(?:Exception|Error):\s*(.+)/
+];
+var HOOK_PATTERN = /Failed to call hook '(\w+)' on plugin '(\w+)'/;
+var OXIDE_ERROR_PATTERN = /(\w+) threw (\w+Exception):\s*(.+)/;
+var STACK_LINE_PATTERN = /^\s+at\s+(.+)/;
+var PLUGIN_STACK_PATTERN = /Oxide\.Plugins\.(\w+)\.(\w+)/;
+function parseRuntimeErrors(logContent, filterPlugin) {
+  const errors2 = [];
+  const lines = logContent.split("\n");
+  let currentError = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const hookMatch = line.match(HOOK_PATTERN);
+    if (hookMatch) {
+      if (currentError?.errorType) {
+        errors2.push(currentError);
+      }
+      currentError = {
+        hookName: hookMatch[1],
+        pluginName: hookMatch[2],
+        errorType: "",
+        message: "",
+        stackTrace: []
+      };
+      continue;
+    }
+    const oxideMatch = line.match(OXIDE_ERROR_PATTERN);
+    if (oxideMatch) {
+      if (currentError?.errorType) {
+        errors2.push(currentError);
+      }
+      currentError = {
+        pluginName: oxideMatch[1],
+        errorType: oxideMatch[2],
+        message: oxideMatch[3],
+        stackTrace: []
+      };
+      continue;
+    }
+    for (const pattern of RUNTIME_ERROR_PATTERNS) {
+      const match = line.match(pattern);
+      if (match) {
+        if (currentError && !currentError.errorType) {
+          currentError.errorType = pattern.source.match(/(\w+Exception|\w+Error)/)?.[1] || "Exception";
+          currentError.message = match[1] || line.trim();
+        } else if (!currentError) {
+          currentError = {
+            pluginName: "Unknown",
+            errorType: pattern.source.match(/(\w+Exception|\w+Error)/)?.[1] || "Exception",
+            message: match[1] || line.trim(),
+            stackTrace: []
+          };
+        }
+        break;
+      }
+    }
+    const stackMatch = line.match(STACK_LINE_PATTERN);
+    if (stackMatch && currentError) {
+      currentError.stackTrace = currentError.stackTrace || [];
+      currentError.stackTrace.push(stackMatch[1]);
+      const pluginMatch = stackMatch[1].match(PLUGIN_STACK_PATTERN);
+      if (pluginMatch && currentError.pluginName === "Unknown") {
+        currentError.pluginName = pluginMatch[1];
+      }
+    }
+    if ((line.trim() === "" || line.match(/^\[\d{2}:\d{2}:\d{2}\]/)) && currentError?.errorType) {
+      errors2.push(currentError);
+      currentError = null;
+    }
+  }
+  if (currentError?.errorType) {
+    errors2.push(currentError);
+  }
+  if (filterPlugin) {
+    return errors2.filter(
+      (e) => e.pluginName.toLowerCase() === filterPlugin.toLowerCase()
+    );
+  }
+  return errors2;
+}
+function formatRuntimeError(error2) {
+  const lines = [
+    `Plugin: ${error2.pluginName}`,
+    `Type: ${error2.errorType}`,
+    `Message: ${error2.message}`
+  ];
+  if (error2.hookName) {
+    lines.push(`Hook: ${error2.hookName}`);
+  }
+  if (error2.stackTrace.length > 0) {
+    lines.push("Stack trace:");
+    const pluginFrames = error2.stackTrace.filter(
+      (f) => f.includes("Oxide.Plugins")
+    );
+    const otherFrames = error2.stackTrace.filter(
+      (f) => !f.includes("Oxide.Plugins")
+    );
+    for (const frame of pluginFrames) {
+      lines.push(`  \u2192 ${frame}`);
+    }
+    if (otherFrames.length > 0) {
+      lines.push(`  ... (${otherFrames.length} more framework frames)`);
+    }
+  }
+  return lines.join("\n");
+}
+function suggestFix(error2) {
+  const suggestions = [];
+  switch (error2.errorType) {
+    case "NullReferenceException":
+      suggestions.push(
+        "A variable or object is null when accessed.",
+        "Common causes:",
+        "  - Player disconnected during operation \u2192 check player != null",
+        "  - Entity was destroyed \u2192 check entity != null && !entity.IsDestroyed",
+        "  - Config or data not loaded \u2192 check _config != null in Init()",
+        "  - Dictionary key does not exist \u2192 use TryGetValue or ContainsKey",
+        "Fix: Add null checks before accessing the object."
+      );
+      break;
+    case "ArgumentException":
+    case "ArgumentNullException":
+      suggestions.push(
+        "A method received an invalid or null argument.",
+        "Common causes:",
+        "  - Empty string passed to a method expecting non-empty",
+        "  - Null item/entity passed to inventory/spawn methods",
+        "Fix: Validate arguments before passing them to methods."
+      );
+      break;
+    case "IndexOutOfRangeException":
+      suggestions.push(
+        "Array/list index is out of bounds.",
+        "Common causes:",
+        "  - args[] accessed without checking args.Length first",
+        "  - Container slot index out of range",
+        "Fix: Check array.Length / list.Count before accessing by index."
+      );
+      break;
+    case "KeyNotFoundException":
+      suggestions.push(
+        "Dictionary key does not exist.",
+        "Fix: Use dictionary.TryGetValue(key, out var value) or dictionary.ContainsKey(key) before accessing."
+      );
+      break;
+    case "InvalidCastException":
+      suggestions.push(
+        "Cannot cast object to target type.",
+        "Common causes:",
+        "  - Hook parameter type mismatch \u2192 verify with rust_docs_get_hook",
+        "  - Wrong entity type cast (e.g., BaseEntity vs BaseCombatEntity)",
+        "Fix: Use 'as' operator with null check, or verify hook signature."
+      );
+      break;
+    case "ObjectDisposedException":
+      suggestions.push(
+        "Accessing a disposed/destroyed object.",
+        "Common causes:",
+        "  - Timer callback runs after plugin unload",
+        "  - Accessing entity after it was killed",
+        "Fix: Check IsDestroyed, and destroy timers in Unload()."
+      );
+      break;
+    case "FormatException":
+      suggestions.push(
+        "String format or parse error.",
+        "Common causes:",
+        "  - string.Format with wrong number of placeholders",
+        "  - int.Parse/float.Parse on non-numeric string",
+        "Fix: Use int.TryParse/float.TryParse, verify format string placeholders."
+      );
+      break;
+    default:
+      suggestions.push(
+        "Check the error message and stack trace for details.",
+        "Use rust_read_logs to get more context around this error."
+      );
+  }
+  if (error2.hookName) {
+    suggestions.push(
+      "",
+      `The error occurred in hook '${error2.hookName}'.`,
+      `Use rust_docs_get_hook to verify the hook signature and parameters.`
+    );
+  }
+  return suggestions.join("\n");
+}
+async function readLogsAndParseErrors(filterPlugin, lines = 250) {
+  let logContent = "";
+  const serverPath = process.env.RUST_SERVER_PATH;
+  if (serverPath) {
+    try {
+      const logsDir = path2.join(serverPath, "oxide", "logs");
+      const files = await fs2.readdir(logsDir);
+      const logFiles = files.filter((f) => f.endsWith(".txt") || f.endsWith(".log")).sort().reverse();
+      if (logFiles.length > 0) {
+        const latestLog = path2.join(logsDir, logFiles[0]);
+        const content = await fs2.readFile(latestLog, "utf-8");
+        const allLines = content.split("\n");
+        logContent = allLines.slice(-lines).join("\n");
+      }
+    } catch {
+    }
+  }
+  if (!logContent) {
+    try {
+      const rcon = getRconClient();
+      await rcon.connect();
+      logContent = await rcon.send("oxide.show errors");
+    } catch {
+    }
+  }
+  return parseRuntimeErrors(logContent, filterPlugin);
+}
+function registerRuntimeErrorTools(server) {
+  server.tool(
+    "rust_check_runtime_errors",
+    "Parse runtime errors from Oxide logs with fix suggestions. Works without RCON if RUST_SERVER_PATH is set (reads local logs). ALWAYS run after successful rust_plugin_push when RCON is available. Also use when user reports issues.",
+    {
+      plugin_name: external_exports.string().optional().describe("Filter errors by plugin name"),
+      lines: external_exports.number().optional().default(200).describe("Number of recent log lines to scan (default 200)"),
+      include_suggestions: external_exports.boolean().optional().default(true).describe("Include fix suggestions for each error (default true)")
+    },
+    async ({ plugin_name, lines, include_suggestions }) => {
+      let logContent = "";
+      const serverPath = process.env.RUST_SERVER_PATH;
+      if (serverPath) {
+        try {
+          const logsDir = path2.join(serverPath, "oxide", "logs");
+          const files = await fs2.readdir(logsDir);
+          const logFiles = files.filter((f) => f.endsWith(".txt") || f.endsWith(".log")).sort().reverse();
+          if (logFiles.length > 0) {
+            const latestLog = path2.join(logsDir, logFiles[0]);
+            const content = await fs2.readFile(latestLog, "utf-8");
+            const allLines = content.split("\n");
+            logContent = allLines.slice(-lines).join("\n");
+          }
+        } catch {
+        }
+      }
+      if (!logContent) {
+        try {
+          const rcon = getRconClient();
+          await rcon.connect();
+          const output = await rcon.send("oxide.show errors");
+          logContent = output;
+        } catch {
+        }
+      }
+      if (!logContent) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "No log content available. Ensure RUST_SERVER_PATH is set or RCON is connected."
+            }
+          ]
+        };
+      }
+      const errors2 = parseRuntimeErrors(logContent, plugin_name);
+      if (errors2.length === 0) {
+        const msg = plugin_name ? `No runtime errors found for plugin "${plugin_name}" in the last ${lines} log lines.` : `No runtime errors found in the last ${lines} log lines.`;
+        return {
+          content: [{ type: "text", text: msg }]
+        };
+      }
+      const sections = [
+        `Found ${errors2.length} runtime error(s)${plugin_name ? ` for plugin "${plugin_name}"` : ""}:`,
+        ""
+      ];
+      for (let i = 0; i < errors2.length; i++) {
+        sections.push(`--- Error ${i + 1} ---`);
+        sections.push(formatRuntimeError(errors2[i]));
+        if (include_suggestions) {
+          sections.push("");
+          sections.push("Suggested fix:");
+          sections.push(suggestFix(errors2[i]));
+        }
+        sections.push("");
+      }
+      return {
+        content: [{ type: "text", text: sections.join("\n") }]
+      };
+    }
+  );
+}
+
+// src/tools/plugin-push.ts
+import fs3 from "fs/promises";
+import path3 from "path";
+var RUNTIME_CHECK_DELAY_MS = parseInt(process.env.RUST_RUNTIME_CHECK_DELAY_MS || "10000", 10) || 1e4;
 function extractPluginMeta(content) {
   const match = content.match(
     /\[Info\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)\]/
@@ -54762,7 +55077,7 @@ function sleep(ms) {
 function registerPluginPushTool(server) {
   server.tool(
     "rust_plugin_push",
-    "Deploy a .cs plugin to Rust server: validate \u2192 copy \u2192 (when RCON available) o.reload \u2192 verify load \u2192 parse errors. Works WITHOUT RCON: file is copied, verification skipped (rconUnavailable: true). ALWAYS use after any code change. Returns errors \u2014 fix and redeploy until success.",
+    "Deploy a .cs plugin to Rust server: validate \u2192 copy \u2192 (when RCON) o.reload \u2192 verify load \u2192 wait 10s \u2192 check logs for runtime errors. Works without RCON (file copied, rconUnavailable). ALWAYS use after code changes. Returns errors + runtimeErrors \u2014 fix and redeploy until success.",
     {
       file_path: external_exports.string().describe("Absolute path to the .cs plugin file in workspace")
     },
@@ -54776,13 +55091,13 @@ function registerPluginPushTool(server) {
       try {
         let content;
         try {
-          content = await fs2.readFile(file_path, "utf-8");
+          content = await fs3.readFile(file_path, "utf-8");
           result.steps.push(`\u2713 File read: ${file_path} (${content.length} bytes)`);
         } catch (readErr) {
           const msg = readErr instanceof Error ? readErr.message : String(readErr);
           result.steps.push(`\u2717 Cannot read file: ${msg}`);
           result.errors = [{
-            file: path2.basename(file_path),
+            file: path3.basename(file_path),
             line: 0,
             column: 0,
             message: `Cannot read file: ${msg}`,
@@ -54794,7 +55109,7 @@ function registerPluginPushTool(server) {
         if (!validation.valid) {
           result.steps.push(`\u2717 Validation failed: ${validation.errors.join("; ")}`);
           result.errors = validation.errors.map((msg) => ({
-            file: path2.basename(file_path),
+            file: path3.basename(file_path),
             line: 0,
             column: 0,
             message: msg,
@@ -54807,7 +55122,7 @@ function registerPluginPushTool(server) {
         if (!meta) {
           result.steps.push("\u2717 Cannot parse [Info] attribute");
           result.errors = [{
-            file: path2.basename(file_path),
+            file: path3.basename(file_path),
             line: 0,
             column: 0,
             message: 'Could not parse [Info("Name", "Author", "Version")] attribute',
@@ -54832,7 +55147,7 @@ function registerPluginPushTool(server) {
         result.steps.push(`\u2713 Deployed to: ${deployResult.remotePath}`);
         if (deployResult.remotePath && !deployResult.remotePath.startsWith("/")) {
           try {
-            const stat = await fs2.stat(deployResult.remotePath);
+            const stat = await fs3.stat(deployResult.remotePath);
             result.steps.push(`\u2713 File confirmed on disk: ${stat.size} bytes`);
           } catch {
             result.steps.push(`\u26A0 Cannot verify file at: ${deployResult.remotePath}`);
@@ -54846,8 +55161,18 @@ function registerPluginPushTool(server) {
           const msg = rconErr instanceof Error ? rconErr.message : String(rconErr);
           result.steps.push(`\u26A0 RCON unavailable: ${msg}. Deploy succeeded; verification skipped.`);
           result.rconUnavailable = true;
-          result.success = true;
           result.pluginInfo = { name: meta.name, version: meta.version, author: meta.author };
+          result.steps.push(`\u23F3 Waiting ${RUNTIME_CHECK_DELAY_MS / 1e3}s for runtime verification...`);
+          await sleep(RUNTIME_CHECK_DELAY_MS);
+          const runtimeErrors = await readLogsAndParseErrors(meta.name, 250);
+          if (runtimeErrors.length > 0) {
+            result.runtimeErrors = runtimeErrors;
+            result.success = false;
+            result.steps.push(`\u2717 Found ${runtimeErrors.length} runtime error(s) in logs`);
+          } else {
+            result.success = true;
+            result.steps.push(`\u2713 No runtime errors in logs after ${RUNTIME_CHECK_DELAY_MS / 1e3}s`);
+          }
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         }
         try {
@@ -54883,24 +55208,34 @@ function registerPluginPushTool(server) {
           }
         }
         if (pluginLoaded) {
-          result.success = true;
           result.pluginInfo = {
             name: meta.name,
             version: meta.version,
             author: meta.author
           };
+          result.steps.push(`\u23F3 Waiting ${RUNTIME_CHECK_DELAY_MS / 1e3}s for runtime verification...`);
+          await sleep(RUNTIME_CHECK_DELAY_MS);
+          const runtimeErrors = await readLogsAndParseErrors(meta.name, 250);
+          if (runtimeErrors.length > 0) {
+            result.runtimeErrors = runtimeErrors;
+            result.success = false;
+            result.steps.push(`\u2717 Found ${runtimeErrors.length} runtime error(s) in logs`);
+          } else {
+            result.success = true;
+            result.steps.push(`\u2713 No runtime errors in logs after ${RUNTIME_CHECK_DELAY_MS / 1e3}s`);
+          }
         } else {
           result.steps.push("\u2717 Plugin NOT found in o.plugins after all attempts");
           let allLogContent = "";
           const serverPath = process.env.RUST_SERVER_PATH;
           if (serverPath) {
             try {
-              const logsDir = path2.join(serverPath, "oxide", "logs");
-              const logFiles = await fs2.readdir(logsDir);
+              const logsDir = path3.join(serverPath, "oxide", "logs");
+              const logFiles = await fs3.readdir(logsDir);
               const oxideLogFiles = logFiles.filter((f) => f.endsWith(".txt") || f.endsWith(".log")).sort().reverse();
               if (oxideLogFiles.length > 0) {
-                const latestLog = path2.join(logsDir, oxideLogFiles[0]);
-                const fullLog = await fs2.readFile(latestLog, "utf-8");
+                const latestLog = path3.join(logsDir, oxideLogFiles[0]);
+                const fullLog = await fs3.readFile(latestLog, "utf-8");
                 const logLines = fullLog.split("\n");
                 const last80 = logLines.slice(-80).join("\n");
                 allLogContent += last80;
@@ -54943,7 +55278,7 @@ function registerPluginPushTool(server) {
         const errorMessage = err instanceof Error ? err.message : String(err);
         result.steps.push(`\u2717 Fatal error: ${errorMessage}`);
         result.errors = [{
-          file: path2.basename(file_path),
+          file: path3.basename(file_path),
           line: 0,
           column: 0,
           message: `Plugin push failed: ${errorMessage}`,
@@ -55113,8 +55448,8 @@ function registerConsoleTools(server) {
 }
 
 // src/tools/logs.ts
-import fs3 from "fs/promises";
-import path3 from "path";
+import fs4 from "fs/promises";
+import path4 from "path";
 function registerLogTools(server) {
   server.tool(
     "rust_read_logs",
@@ -55136,9 +55471,9 @@ function registerLogTools(server) {
           ]
         };
       }
-      const logsDir = path3.join(serverPath, "oxide", "logs");
+      const logsDir = path4.join(serverPath, "oxide", "logs");
       try {
-        const files = await fs3.readdir(logsDir);
+        const files = await fs4.readdir(logsDir);
         const logFiles = files.filter((f) => f.endsWith(".txt") || f.endsWith(".log")).sort().reverse();
         if (logFiles.length === 0) {
           return {
@@ -55147,8 +55482,8 @@ function registerLogTools(server) {
             ]
           };
         }
-        const latestLog = path3.join(logsDir, logFiles[0]);
-        const content = await fs3.readFile(latestLog, "utf-8");
+        const latestLog = path4.join(logsDir, logFiles[0]);
+        const content = await fs4.readFile(latestLog, "utf-8");
         let logLines = content.split("\n");
         if (plugin_name) {
           logLines = logLines.filter(
@@ -55188,8 +55523,8 @@ function registerLogTools(server) {
 }
 
 // src/tools/config-data.ts
-import fs4 from "fs/promises";
-import path4 from "path";
+import fs5 from "fs/promises";
+import path5 from "path";
 function registerConfigDataTools(server) {
   server.tool(
     "rust_read_config",
@@ -55207,13 +55542,13 @@ function registerConfigDataTools(server) {
         };
       }
       try {
-        const configPath = path4.join(
+        const configPath = path5.join(
           serverPath,
           "oxide",
           "config",
           `${plugin_name}.json`
         );
-        const content = await fs4.readFile(configPath, "utf-8");
+        const content = await fs5.readFile(configPath, "utf-8");
         return { content: [{ type: "text", text: content }] };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -55251,10 +55586,10 @@ function registerConfigDataTools(server) {
         };
       }
       try {
-        const configDir = path4.join(serverPath, "oxide", "config");
-        await fs4.mkdir(configDir, { recursive: true });
-        const configPath = path4.join(configDir, `${plugin_name}.json`);
-        await fs4.writeFile(configPath, config2, "utf-8");
+        const configDir = path5.join(serverPath, "oxide", "config");
+        await fs5.mkdir(configDir, { recursive: true });
+        const configPath = path5.join(configDir, `${plugin_name}.json`);
+        await fs5.writeFile(configPath, config2, "utf-8");
         const rcon = getRconClient();
         await rcon.connect();
         const reloadResult = await rcon.send(`o.reload ${plugin_name}`);
@@ -55296,7 +55631,7 @@ Reload result: ${reloadResult}`
       try {
         let dataPath;
         if (file_name) {
-          dataPath = path4.join(
+          dataPath = path5.join(
             serverPath,
             "oxide",
             "data",
@@ -55304,14 +55639,14 @@ Reload result: ${reloadResult}`
             file_name
           );
         } else {
-          dataPath = path4.join(
+          dataPath = path5.join(
             serverPath,
             "oxide",
             "data",
             `${plugin_name}.json`
           );
         }
-        const content = await fs4.readFile(dataPath, "utf-8");
+        const content = await fs5.readFile(dataPath, "utf-8");
         return { content: [{ type: "text", text: content }] };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -70022,15 +70357,15 @@ function parseGuidesIndexFull(html3) {
 }
 
 // src/docs/cache.ts
-import fs5 from "fs/promises";
-import path5 from "path";
+import fs6 from "fs/promises";
+import path6 from "path";
 import os from "os";
-var CACHE_DIR = path5.join(os.homedir(), ".rust-mcp-cache");
+var CACHE_DIR = path6.join(os.homedir(), ".rust-mcp-cache");
 var TTL_MS = 24 * 60 * 60 * 1e3;
 var MAX_ENTRIES = 500;
 async function ensureCacheDir(subdir) {
-  const dir = subdir ? path5.join(CACHE_DIR, subdir) : CACHE_DIR;
-  await fs5.mkdir(dir, { recursive: true });
+  const dir = subdir ? path6.join(CACHE_DIR, subdir) : CACHE_DIR;
+  await fs6.mkdir(dir, { recursive: true });
   return dir;
 }
 function sanitizeKey(key) {
@@ -70039,12 +70374,12 @@ function sanitizeKey(key) {
 async function getCached(category, key) {
   try {
     const dir = await ensureCacheDir(category);
-    const filePath = path5.join(dir, `${sanitizeKey(key)}.json`);
-    const raw = await fs5.readFile(filePath, "utf-8");
+    const filePath = path6.join(dir, `${sanitizeKey(key)}.json`);
+    const raw = await fs6.readFile(filePath, "utf-8");
     const entry = JSON.parse(raw);
     const age = Date.now() - new Date(entry.cachedAt).getTime();
     if (age > TTL_MS) {
-      await fs5.unlink(filePath).catch(() => {
+      await fs6.unlink(filePath).catch(() => {
       });
       return null;
     }
@@ -70059,24 +70394,24 @@ async function setCache(category, key, data2) {
     data: data2,
     cachedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
-  const filePath = path5.join(dir, `${sanitizeKey(key)}.json`);
-  await fs5.writeFile(filePath, JSON.stringify(entry), "utf-8");
+  const filePath = path6.join(dir, `${sanitizeKey(key)}.json`);
+  await fs6.writeFile(filePath, JSON.stringify(entry), "utf-8");
   evictIfNeeded(dir).catch(() => {
   });
 }
 async function evictIfNeeded(dir) {
-  const files = await fs5.readdir(dir);
+  const files = await fs6.readdir(dir);
   if (files.length <= MAX_ENTRIES) return;
   const stats = await Promise.all(
     files.map(async (f) => {
-      const fp = path5.join(dir, f);
-      const st = await fs5.stat(fp);
+      const fp = path6.join(dir, f);
+      const st = await fs6.stat(fp);
       return { path: fp, mtime: st.mtimeMs };
     })
   );
   stats.sort((a, b) => a.mtime - b.mtime);
   const toRemove = stats.slice(0, files.length - MAX_ENTRIES);
-  await Promise.all(toRemove.map((f) => fs5.unlink(f.path).catch(() => {
+  await Promise.all(toRemove.map((f) => fs6.unlink(f.path).catch(() => {
   })));
 }
 
@@ -72571,8 +72906,8 @@ Use when you need to find what documentation exists or direct the user to specif
 }
 
 // src/watcher/file-watcher.ts
-import fs6 from "fs";
-import path6 from "path";
+import fs7 from "fs";
+import path7 from "path";
 var DEBOUNCE_MS = 1e3;
 var PluginFileWatcher = class {
   watchers = /* @__PURE__ */ new Map();
@@ -72588,14 +72923,14 @@ var PluginFileWatcher = class {
   watch(directory) {
     if (this.watchers.has(directory)) return;
     try {
-      const watcher = fs6.watch(
+      const watcher = fs7.watch(
         directory,
         { recursive: true },
         (eventType, filename) => {
           if (!filename || !filename.endsWith(".cs")) return;
           if (eventType !== "change" && eventType !== "rename") return;
-          const filePath = path6.join(directory, filename);
-          const pluginName = path6.basename(filename, ".cs");
+          const filePath = path7.join(directory, filename);
+          const pluginName = path7.basename(filename, ".cs");
           const existing = this.debounceTimers.get(filePath);
           if (existing) clearTimeout(existing);
           this.debounceTimers.set(
@@ -72603,7 +72938,7 @@ var PluginFileWatcher = class {
             setTimeout(() => {
               this.debounceTimers.delete(filePath);
               try {
-                fs6.accessSync(filePath, fs6.constants.R_OK);
+                fs7.accessSync(filePath, fs7.constants.R_OK);
               } catch {
                 return;
               }
@@ -72659,7 +72994,7 @@ function getFileWatcher() {
 }
 
 // src/tools/file-watcher.ts
-import fs7 from "fs/promises";
+import fs8 from "fs/promises";
 var autoPushHistory = [];
 var MAX_HISTORY = 50;
 function extractPluginName(content) {
@@ -72683,7 +73018,7 @@ function registerFileWatcherTools(server) {
     async ({ directory, auto_push }) => {
       const watcher = getFileWatcher();
       try {
-        await fs7.access(directory);
+        await fs8.access(directory);
       } catch {
         return {
           content: [
@@ -72705,7 +73040,7 @@ function registerFileWatcherTools(server) {
             loaded: false
           };
           try {
-            const content = await fs7.readFile(event.filePath, "utf-8");
+            const content = await fs8.readFile(event.filePath, "utf-8");
             const pluginName = extractPluginName(content) || event.pluginName;
             const deployResult = await deployPlugin(
               event.filePath,
@@ -72826,293 +73161,6 @@ ${watched.map((d) => `  - ${d}`).join("\n")}`
       }
       return {
         content: [{ type: "text", text: lines.join("\n") }]
-      };
-    }
-  );
-}
-
-// src/tools/runtime-errors.ts
-import fs8 from "fs/promises";
-import path7 from "path";
-var RUNTIME_ERROR_PATTERNS = [
-  // NullReferenceException
-  /(?:NullReferenceException|NRE):\s*(.+)/,
-  // ArgumentException
-  /ArgumentException:\s*(.+)/,
-  // ArgumentNullException
-  /ArgumentNullException:\s*(.+)/,
-  // ArgumentOutOfRangeException
-  /ArgumentOutOfRangeException:\s*(.+)/,
-  // InvalidOperationException
-  /InvalidOperationException:\s*(.+)/,
-  // IndexOutOfRangeException
-  /IndexOutOfRangeException:\s*(.+)/,
-  // KeyNotFoundException
-  /KeyNotFoundException:\s*(.+)/,
-  // InvalidCastException
-  /InvalidCastException:\s*(.+)/,
-  // FormatException
-  /FormatException:\s*(.+)/,
-  // OverflowException
-  /OverflowException:\s*(.+)/,
-  // ObjectDisposedException
-  /ObjectDisposedException:\s*(.+)/,
-  // Generic Exception
-  /(?:Exception|Error):\s*(.+)/
-];
-var HOOK_PATTERN = /Failed to call hook '(\w+)' on plugin '(\w+)'/;
-var OXIDE_ERROR_PATTERN = /(\w+) threw (\w+Exception):\s*(.+)/;
-var STACK_LINE_PATTERN = /^\s+at\s+(.+)/;
-var PLUGIN_STACK_PATTERN = /Oxide\.Plugins\.(\w+)\.(\w+)/;
-function parseRuntimeErrors(logContent, filterPlugin) {
-  const errors2 = [];
-  const lines = logContent.split("\n");
-  let currentError = null;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const hookMatch = line.match(HOOK_PATTERN);
-    if (hookMatch) {
-      if (currentError?.errorType) {
-        errors2.push(currentError);
-      }
-      currentError = {
-        hookName: hookMatch[1],
-        pluginName: hookMatch[2],
-        errorType: "",
-        message: "",
-        stackTrace: []
-      };
-      continue;
-    }
-    const oxideMatch = line.match(OXIDE_ERROR_PATTERN);
-    if (oxideMatch) {
-      if (currentError?.errorType) {
-        errors2.push(currentError);
-      }
-      currentError = {
-        pluginName: oxideMatch[1],
-        errorType: oxideMatch[2],
-        message: oxideMatch[3],
-        stackTrace: []
-      };
-      continue;
-    }
-    for (const pattern of RUNTIME_ERROR_PATTERNS) {
-      const match = line.match(pattern);
-      if (match) {
-        if (currentError && !currentError.errorType) {
-          currentError.errorType = pattern.source.match(/(\w+Exception|\w+Error)/)?.[1] || "Exception";
-          currentError.message = match[1] || line.trim();
-        } else if (!currentError) {
-          currentError = {
-            pluginName: "Unknown",
-            errorType: pattern.source.match(/(\w+Exception|\w+Error)/)?.[1] || "Exception",
-            message: match[1] || line.trim(),
-            stackTrace: []
-          };
-        }
-        break;
-      }
-    }
-    const stackMatch = line.match(STACK_LINE_PATTERN);
-    if (stackMatch && currentError) {
-      currentError.stackTrace = currentError.stackTrace || [];
-      currentError.stackTrace.push(stackMatch[1]);
-      const pluginMatch = stackMatch[1].match(PLUGIN_STACK_PATTERN);
-      if (pluginMatch && currentError.pluginName === "Unknown") {
-        currentError.pluginName = pluginMatch[1];
-      }
-    }
-    if ((line.trim() === "" || line.match(/^\[\d{2}:\d{2}:\d{2}\]/)) && currentError?.errorType) {
-      errors2.push(currentError);
-      currentError = null;
-    }
-  }
-  if (currentError?.errorType) {
-    errors2.push(currentError);
-  }
-  if (filterPlugin) {
-    return errors2.filter(
-      (e) => e.pluginName.toLowerCase() === filterPlugin.toLowerCase()
-    );
-  }
-  return errors2;
-}
-function formatRuntimeError(error2) {
-  const lines = [
-    `Plugin: ${error2.pluginName}`,
-    `Type: ${error2.errorType}`,
-    `Message: ${error2.message}`
-  ];
-  if (error2.hookName) {
-    lines.push(`Hook: ${error2.hookName}`);
-  }
-  if (error2.stackTrace.length > 0) {
-    lines.push("Stack trace:");
-    const pluginFrames = error2.stackTrace.filter(
-      (f) => f.includes("Oxide.Plugins")
-    );
-    const otherFrames = error2.stackTrace.filter(
-      (f) => !f.includes("Oxide.Plugins")
-    );
-    for (const frame of pluginFrames) {
-      lines.push(`  \u2192 ${frame}`);
-    }
-    if (otherFrames.length > 0) {
-      lines.push(`  ... (${otherFrames.length} more framework frames)`);
-    }
-  }
-  return lines.join("\n");
-}
-function suggestFix(error2) {
-  const suggestions = [];
-  switch (error2.errorType) {
-    case "NullReferenceException":
-      suggestions.push(
-        "A variable or object is null when accessed.",
-        "Common causes:",
-        "  - Player disconnected during operation \u2192 check player != null",
-        "  - Entity was destroyed \u2192 check entity != null && !entity.IsDestroyed",
-        "  - Config or data not loaded \u2192 check _config != null in Init()",
-        "  - Dictionary key does not exist \u2192 use TryGetValue or ContainsKey",
-        "Fix: Add null checks before accessing the object."
-      );
-      break;
-    case "ArgumentException":
-    case "ArgumentNullException":
-      suggestions.push(
-        "A method received an invalid or null argument.",
-        "Common causes:",
-        "  - Empty string passed to a method expecting non-empty",
-        "  - Null item/entity passed to inventory/spawn methods",
-        "Fix: Validate arguments before passing them to methods."
-      );
-      break;
-    case "IndexOutOfRangeException":
-      suggestions.push(
-        "Array/list index is out of bounds.",
-        "Common causes:",
-        "  - args[] accessed without checking args.Length first",
-        "  - Container slot index out of range",
-        "Fix: Check array.Length / list.Count before accessing by index."
-      );
-      break;
-    case "KeyNotFoundException":
-      suggestions.push(
-        "Dictionary key does not exist.",
-        "Fix: Use dictionary.TryGetValue(key, out var value) or dictionary.ContainsKey(key) before accessing."
-      );
-      break;
-    case "InvalidCastException":
-      suggestions.push(
-        "Cannot cast object to target type.",
-        "Common causes:",
-        "  - Hook parameter type mismatch \u2192 verify with rust_docs_get_hook",
-        "  - Wrong entity type cast (e.g., BaseEntity vs BaseCombatEntity)",
-        "Fix: Use 'as' operator with null check, or verify hook signature."
-      );
-      break;
-    case "ObjectDisposedException":
-      suggestions.push(
-        "Accessing a disposed/destroyed object.",
-        "Common causes:",
-        "  - Timer callback runs after plugin unload",
-        "  - Accessing entity after it was killed",
-        "Fix: Check IsDestroyed, and destroy timers in Unload()."
-      );
-      break;
-    case "FormatException":
-      suggestions.push(
-        "String format or parse error.",
-        "Common causes:",
-        "  - string.Format with wrong number of placeholders",
-        "  - int.Parse/float.Parse on non-numeric string",
-        "Fix: Use int.TryParse/float.TryParse, verify format string placeholders."
-      );
-      break;
-    default:
-      suggestions.push(
-        "Check the error message and stack trace for details.",
-        "Use rust_read_logs to get more context around this error."
-      );
-  }
-  if (error2.hookName) {
-    suggestions.push(
-      "",
-      `The error occurred in hook '${error2.hookName}'.`,
-      `Use rust_docs_get_hook to verify the hook signature and parameters.`
-    );
-  }
-  return suggestions.join("\n");
-}
-function registerRuntimeErrorTools(server) {
-  server.tool(
-    "rust_check_runtime_errors",
-    "Parse runtime errors from Oxide logs with fix suggestions. Works without RCON if RUST_SERVER_PATH is set (reads local logs). ALWAYS run after successful rust_plugin_push when RCON is available. Also use when user reports issues.",
-    {
-      plugin_name: external_exports.string().optional().describe("Filter errors by plugin name"),
-      lines: external_exports.number().optional().default(200).describe("Number of recent log lines to scan (default 200)"),
-      include_suggestions: external_exports.boolean().optional().default(true).describe("Include fix suggestions for each error (default true)")
-    },
-    async ({ plugin_name, lines, include_suggestions }) => {
-      let logContent = "";
-      const serverPath = process.env.RUST_SERVER_PATH;
-      if (serverPath) {
-        try {
-          const logsDir = path7.join(serverPath, "oxide", "logs");
-          const files = await fs8.readdir(logsDir);
-          const logFiles = files.filter((f) => f.endsWith(".txt") || f.endsWith(".log")).sort().reverse();
-          if (logFiles.length > 0) {
-            const latestLog = path7.join(logsDir, logFiles[0]);
-            const content = await fs8.readFile(latestLog, "utf-8");
-            const allLines = content.split("\n");
-            logContent = allLines.slice(-lines).join("\n");
-          }
-        } catch {
-        }
-      }
-      if (!logContent) {
-        try {
-          const rcon = getRconClient();
-          await rcon.connect();
-          const output = await rcon.send("oxide.show errors");
-          logContent = output;
-        } catch {
-        }
-      }
-      if (!logContent) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "No log content available. Ensure RUST_SERVER_PATH is set or RCON is connected."
-            }
-          ]
-        };
-      }
-      const errors2 = parseRuntimeErrors(logContent, plugin_name);
-      if (errors2.length === 0) {
-        const msg = plugin_name ? `No runtime errors found for plugin "${plugin_name}" in the last ${lines} log lines.` : `No runtime errors found in the last ${lines} log lines.`;
-        return {
-          content: [{ type: "text", text: msg }]
-        };
-      }
-      const sections = [
-        `Found ${errors2.length} runtime error(s)${plugin_name ? ` for plugin "${plugin_name}"` : ""}:`,
-        ""
-      ];
-      for (let i = 0; i < errors2.length; i++) {
-        sections.push(`--- Error ${i + 1} ---`);
-        sections.push(formatRuntimeError(errors2[i]));
-        if (include_suggestions) {
-          sections.push("");
-          sections.push("Suggested fix:");
-          sections.push(suggestFix(errors2[i]));
-        }
-        sections.push("");
-      }
-      return {
-        content: [{ type: "text", text: sections.join("\n") }]
       };
     }
   );
@@ -74850,8 +74898,8 @@ You have access to MCP tools for automated plugin development. Each tool has a c
 
 ### Phase B: Deploy \u2014 Fix \u2014 Redeploy Loop (MANDATORY after code changes)
 After **any** change to plugin code:
-1. **Deploy**: \`rust_plugin_push\` \u2014 ALWAYS run after saving changes. Deploy works even without RCON (file is copied; verification skipped).
-2. **Check**: rust_plugin_push returns compilation errors in \`errors\`. If \`errors\` is present \u2014 fix them immediately.
+1. **Deploy**: \`rust_plugin_push\` \u2014 ALWAYS run after saving changes. Waits 10s after load, then checks logs for runtime errors.
+2. **Check**: rust_plugin_push returns \`errors\` (compilation) and \`runtimeErrors\` (from logs after 10s). If either present \u2014 fix immediately.
 3. **Redeploy**: Run \`rust_plugin_push\` again. Repeat until \`success: true\` and no errors.
 - \`rust_grant_permission\` \u2014 ONLY on first push with new permissions.
 - \`rust_read_config\` \u2014 ONLY on first push with config or after config structure change.
