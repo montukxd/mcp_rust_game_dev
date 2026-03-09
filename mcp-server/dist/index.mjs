@@ -54428,6 +54428,9 @@ var RconClient = class {
   isConnecting = false;
   shouldReconnect = true;
   reconnectScheduled = false;
+  /** Буфер последних консольных сообщений (Identifier <= 0). До 1000 строк. */
+  consoleBuffer = [];
+  maxConsoleBuffer = 1e3;
   host;
   port;
   password;
@@ -54488,7 +54491,15 @@ var RconClient = class {
   handleMessage(data2) {
     try {
       const msg = JSON.parse(data2.toString());
-      if (msg.Identifier <= 0) return;
+      if (msg.Identifier <= 0) {
+        if (msg.Message?.trim()) {
+          this.consoleBuffer.push(msg.Message.trim());
+          if (this.consoleBuffer.length > this.maxConsoleBuffer) {
+            this.consoleBuffer.shift();
+          }
+        }
+        return;
+      }
       const pending = this.pendingRequests.get(msg.Identifier);
       if (pending) {
         clearTimeout(pending.timer);
@@ -54560,6 +54571,26 @@ var RconClient = class {
   }
   get isConnected() {
     return this.ws?.readyState === wrapper_default.OPEN;
+  }
+  /** Последние N строк из консоли сервера (буфер наполняется при получении сообщений с Identifier 0). */
+  getConsoleTail(lines = 500) {
+    const start = Math.max(0, this.consoleBuffer.length - lines);
+    return this.consoleBuffer.slice(start);
+  }
+  /**
+   * Подключиться, подождать и собрать консольный вывод. WebRCON стримит консоль (Identifier 0).
+   * Возвращает последние lines строк. waitMs — сколько ждать приёма сообщений.
+   */
+  async collectConsoleOutput(lines = 500, waitMs = 3e3) {
+    await this.ensureConnected();
+    const before2 = this.consoleBuffer.length;
+    await this.send("status");
+    await new Promise((r) => setTimeout(r, waitMs));
+    const tail = this.getConsoleTail(lines);
+    if (tail.length > 0) {
+      return tail.join("\n");
+    }
+    return "";
   }
 };
 var rconInstance = null;
@@ -54728,6 +54759,8 @@ var OXIDE_ERROR_PATTERN = /(\w+)\s+threw\s+(\w+Exception):\s*(.+)/i;
 var OXIDE_PAREN_PATTERN = /\((\w+Exception):\s*(.+?)\)\s*$/;
 var STACK_LINE_PATTERN = /^\s+at\s+(.+)/;
 var PLUGIN_STACK_PATTERN = /Oxide\.Plugins\.(\w+)\.(\w+)/;
+var PREFAB_ERROR_PATTERN = /Couldn't find prefab\s+"([^"]+)"/i;
+var ASSET_ERROR_PATTERN = /Couldn't find (?:prefab|asset|bundle)\s+["']?([^"'\s]+)["']?/i;
 function parseRuntimeErrors(logContent, filterPlugin) {
   const errors2 = [];
   const lines = logContent.split("\n");
@@ -54748,6 +54781,20 @@ function parseRuntimeErrors(logContent, filterPlugin) {
         message: parenMatch ? parenMatch[2].trim() : "",
         stackTrace: []
       };
+      continue;
+    }
+    const prefabMatch = line.match(PREFAB_ERROR_PATTERN) || line.match(ASSET_ERROR_PATTERN);
+    if (prefabMatch) {
+      if (currentError?.errorType) {
+        errors2.push(currentError);
+      }
+      errors2.push({
+        pluginName: "Unknown",
+        errorType: "PrefabNotFound",
+        message: line.trim(),
+        stackTrace: []
+      });
+      currentError = null;
       continue;
     }
     const oxideMatch = line.match(OXIDE_ERROR_PATTERN);
@@ -54896,6 +54943,16 @@ function suggestFix(error2) {
         "Fix: Use int.TryParse/float.TryParse, verify format string placeholders."
       );
       break;
+    case "PrefabNotFound":
+      suggestions.push(
+        "Prefab path is wrong or prefab doesn't exist in this Rust version.",
+        "Common causes:",
+        "  - Typo in prefab path (e.g. laptop vs laptop.deployed)",
+        "  - Prefab was renamed/removed in Rust update",
+        "  - Wrong path format \u2014 use GameManager.server.FindPrefab() to verify",
+        "Fix: Check rust_docs_get_hook for correct prefab paths. Use assets/prefabs/... format. Verify path exists in current Rust build."
+      );
+      break;
     default:
       suggestions.push(
         "Check the error message and stack trace for details.",
@@ -54911,20 +54968,131 @@ function suggestFix(error2) {
   }
   return suggestions.join("\n");
 }
-async function readFileTail(filePath, lines) {
+var MAX_LOG_FILE_BYTES = 2 * 1024 * 1024;
+async function readFileTail(filePath, lines, maxBytes = MAX_LOG_FILE_BYTES) {
+  const stat = await fs2.stat(filePath);
+  if (stat.size > maxBytes) return "";
   const content = await fs2.readFile(filePath, "utf-8");
   const allLines = content.split("\n");
   return allLines.slice(-lines).join("\n");
 }
+function parseLogFileFromStartup(content) {
+  const patterns = [
+    /-logfile\s+["']([^"']+)["']/i,
+    /-logfile\s+(\S+)/i,
+    /-logfile=(["']?)([^\s"']+)\1/i
+  ];
+  for (const re of patterns) {
+    const m = content.match(re);
+    if (m) return m[1] || m[2];
+  }
+  return null;
+}
+function resolveLogPath(logPath, baseDir) {
+  const normalized = logPath.replace(/[/\\]/g, path2.sep);
+  if (path2.isAbsolute(normalized)) return normalized;
+  return path2.resolve(baseDir, normalized);
+}
+async function findStartupFile(serverPath) {
+  const explicit = process.env.RUST_STARTUP_FILE;
+  if (explicit) {
+    const resolved = path2.isAbsolute(explicit) ? explicit : path2.resolve(serverPath, explicit);
+    try {
+      await fs2.stat(resolved);
+      return resolved;
+    } catch {
+    }
+  }
+  const names = ["start.bat", "run.bat", "RustDedicated.bat", "start.cmd", "run.cmd", "start.sh"];
+  for (const name of names) {
+    const p = path2.join(serverPath, name);
+    try {
+      await fs2.stat(p);
+      return p;
+    } catch {
+      const parent2 = path2.join(serverPath, "..", name);
+      try {
+        await fs2.stat(parent2);
+        return path2.resolve(parent2);
+      } catch {
+      }
+    }
+  }
+  return null;
+}
+var CONSOLE_LOG_NAMES = ["output.txt", "output_log.txt", "Player.log", "output_log"];
 async function readLogContent(serverPath, lines) {
   const parts = [];
+  const seen = /* @__PURE__ */ new Set();
+  const startupFile = await findStartupFile(serverPath);
+  if (startupFile) {
+    try {
+      const startupContent = await fs2.readFile(startupFile, "utf-8");
+      const logPath = parseLogFileFromStartup(startupContent);
+      if (logPath) {
+        const baseDir = path2.dirname(startupFile);
+        const resolved = resolveLogPath(logPath, baseDir);
+        if (!seen.has(resolved)) {
+          try {
+            const stat = await fs2.stat(resolved);
+            if (stat.isFile()) {
+              seen.add(resolved);
+              const tail = await readFileTail(resolved, lines);
+              if (tail.length > 10) parts.push(`[logFile: ${path2.basename(resolved)}]
+${tail}`);
+            }
+          } catch {
+            const dir = path2.dirname(resolved);
+            const fname = path2.basename(resolved);
+            try {
+              const files = await fs2.readdir(dir);
+              const matches = files.filter((f) => f.includes(fname) || fname.includes(f)).sort().reverse();
+              for (const f of matches.slice(0, 2)) {
+                const p = path2.join(dir, f);
+                if (seen.has(p)) continue;
+                const tail = await readFileTail(p, lines);
+                if (tail.length > 10) {
+                  seen.add(p);
+                  parts.push(`[logFile: ${f}]
+${tail}`);
+                  break;
+                }
+              }
+            } catch {
+            }
+          }
+        }
+      }
+    } catch {
+    }
+  }
+  for (const name of CONSOLE_LOG_NAMES) {
+    for (const dir of [
+      serverPath,
+      path2.join(serverPath, "server"),
+      path2.join(serverPath, "rustds_Data"),
+      path2.join(serverPath, "RustDedicated_Data")
+    ]) {
+      const logPath = path2.join(dir, name);
+      if (seen.has(logPath)) continue;
+      try {
+        const stat = await fs2.stat(logPath);
+        if (stat.isFile()) {
+          seen.add(logPath);
+          const tail = await readFileTail(logPath, lines);
+          if (tail.length > 10) parts.push(`[${name}]
+${tail}`);
+        }
+      } catch {
+      }
+    }
+  }
   const candidates = [
     path2.join(serverPath, "oxide", "logs"),
     path2.join(serverPath, "logs"),
     path2.join(serverPath, "server"),
     serverPath
   ];
-  const seen = /* @__PURE__ */ new Set();
   for (const logsDir of candidates) {
     try {
       const stat = await fs2.stat(logsDir);
@@ -54948,7 +55116,7 @@ ${tail}`);
   return parts.join("\n\n");
 }
 async function findLogsInDir(dir, lines, depth = 0) {
-  if (depth > 2) return "";
+  if (depth > 3) return "";
   try {
     const entries = await fs2.readdir(dir, { withFileTypes: true });
     const logFiles = entries.filter((e) => e.isFile() && (e.name.endsWith(".txt") || e.name.endsWith(".log"))).map((e) => ({ name: e.name, filePath: path2.join(dir, e.name) })).sort((a, b) => b.name.localeCompare(a.name));
@@ -54965,34 +55133,147 @@ async function findLogsInDir(dir, lines, depth = 0) {
   }
   return "";
 }
+async function readServerConsoleLog(lines = 300) {
+  const serverPath = process.env.RUST_SERVER_PATH;
+  if (!serverPath) return null;
+  const explicitPath = process.env.RUST_CONSOLE_LOG_PATH;
+  if (explicitPath) {
+    const resolved = path2.isAbsolute(explicitPath) ? explicitPath : path2.resolve(serverPath, explicitPath);
+    try {
+      const stat = await fs2.stat(resolved);
+      if (stat.isFile()) {
+        const content = await readFileTail(resolved, lines);
+        if (content.length > 10) return { path: resolved, content };
+      }
+    } catch {}
+  }
+  const startupFile = await findStartupFile(serverPath);
+  if (startupFile) {
+    try {
+      const startupContent = await fs2.readFile(startupFile, "utf-8");
+      const logPath = parseLogFileFromStartup(startupContent);
+      if (logPath) {
+        const baseDir = path2.dirname(startupFile);
+        const resolved = resolveLogPath(logPath, baseDir);
+        try {
+          const stat = await fs2.stat(resolved);
+          if (stat.isFile()) {
+            const content = await readFileTail(resolved, lines);
+            if (content.length > 10) return { path: resolved, content };
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+  const consoleNames = ["output.txt", "output_log.txt", "server.log", "Player.log", "output_log"];
+  const searchDirs = [
+    serverPath,
+    path2.join(serverPath, "server"),
+    path2.join(serverPath, "rustds_Data"),
+    path2.join(serverPath, "RustDedicated_Data")
+  ];
+  for (const name of consoleNames) {
+    for (const dir of searchDirs) {
+      const logPath = path2.join(dir, name);
+      try {
+        const stat = await fs2.stat(logPath);
+        if (stat.isFile() && stat.size > 0) {
+          const content = await readFileTail(logPath, lines);
+          if (content.length > 10) return { path: logPath, content };
+        }
+      } catch {}
+    }
+  }
+  return null;
+}
+function parseConsoleErrors(content, pluginName) {
+  if (!content) return [];
+  const errors2 = [];
+  const seen = new Set();
+  const lines = content.split("\n");
+  const errorPatterns = [
+    /Couldn't find prefab\s+"([^"]+)"/i,
+    /Couldn't find (?:prefab|asset|bundle)\s+["']?([^"'\s]+)["']?/i,
+    /Failed to call hook '(\w+)'/i,
+    /(?:NullReferenceException|NRE):\s*(.+)/,
+    /(\w+Exception):\s*(.+)/,
+    /error while compiling/i,
+    /failed to compile/i,
+    /Failed to initialize plugin '(\w+)'/i
+  ];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (pluginName && !trimmed.toLowerCase().includes(pluginName.toLowerCase()) && !trimmed.match(/Couldn't find prefab/i) && !trimmed.match(/Exception:/)) continue;
+    for (const pattern of errorPatterns) {
+      if (pattern.test(trimmed)) {
+        if (!seen.has(trimmed)) {
+          seen.add(trimmed);
+          errors2.push({
+            pluginName: pluginName || "Unknown",
+            errorType: "ConsoleError",
+            message: trimmed,
+            stackTrace: [],
+            source: "server_console_log"
+          });
+        }
+        break;
+      }
+    }
+  }
+  return errors2;
+}
 var RCON_LOG_COMMANDS = [
   "oxide.show errors",
   "oxide.show logs",
   "serverlog",
-  "log"
+  "log",
+  "log.file"
 ];
 async function readLogsAndParseErrors(filterPlugin, lines = 500) {
   const parts = [];
-  const serverPath = process.env.RUST_SERVER_PATH;
-  if (serverPath) {
-    let fsContent = await readLogContent(serverPath, lines);
-    if (!fsContent) {
-      fsContent = await findLogsInDir(path2.join(serverPath, "server"), lines);
-    }
-    if (fsContent) parts.push(fsContent);
-  }
   try {
     const rcon = getRconClient();
-    await rcon.connect();
+    const waitMs = parseInt(process.env.RUST_RCON_CONSOLE_WAIT_MS || "3000", 10) || 3e3;
+    const consoleOutput = await rcon.collectConsoleOutput(lines, waitMs);
+    if (consoleOutput) parts.push(`[RCON console]
+${consoleOutput}`);
     for (const cmd of RCON_LOG_COMMANDS) {
       try {
         const output = await rcon.send(cmd);
-        if (output?.trim()) parts.push(`[RCON: ${cmd}]
+        if (output?.trim()) {
+          if (cmd === "log.file" && (output.includes("/") || output.includes("\\"))) {
+            const logPath = output.trim().replace(/^["']|["']$/g, "");
+            try {
+              const stat = await fs2.stat(logPath);
+              if (stat.size <= MAX_LOG_FILE_BYTES) {
+                const tail = await readFileTail(logPath, lines);
+                if (tail.length > 10) parts.push(`[RCON log file]
+${tail}`);
+              }
+            } catch {
+              parts.push(`[RCON: ${cmd}]
 ${output}`);
+            }
+          } else {
+            parts.push(`[RCON: ${cmd}]
+${output}`);
+          }
+        }
       } catch {
       }
     }
   } catch {
+  }
+  if (parts.length === 0) {
+    const serverPath = process.env.RUST_SERVER_PATH;
+    if (serverPath) {
+      let fsContent = await readLogContent(serverPath, lines);
+      if (!fsContent) {
+        fsContent = await findLogsInDir(path2.join(serverPath, "server"), lines) || await findLogsInDir(serverPath, lines);
+      }
+      if (fsContent) parts.push(fsContent);
+    }
   }
   const logContent = parts.join("\n\n");
   return parseRuntimeErrors(logContent, filterPlugin);
@@ -55104,7 +55385,7 @@ function sleep(ms) {
 function registerPluginPushTool(server) {
   server.tool(
     "rust_plugin_push",
-    "Deploy a .cs plugin to Rust server: validate \u2192 copy \u2192 (when RCON) o.reload \u2192 verify load \u2192 wait 5s \u2192 check oxide logs AND RCON console for runtime errors. Only after this check respond to user. Works without RCON (file copied, rconUnavailable). ALWAYS use after code changes. Returns errors + runtimeErrors \u2014 fix and redeploy until success.",
+    "Deploy a .cs plugin to Rust server: validate \u2192 copy \u2192 (when RCON) o.reload \u2192 verify load \u2192 wait 5s \u2192 check oxide logs AND RCON console AND server console log (output.txt) for runtime errors. Only after this check respond to user. Works without RCON (file copied, rconUnavailable). ALWAYS use after code changes. Returns errors + runtimeErrors + consoleErrors \u2014 fix and redeploy until success.",
     {
       file_path: external_exports.string().describe("Absolute path to the .cs plugin file in workspace")
     },
@@ -55192,13 +55473,21 @@ function registerPluginPushTool(server) {
           result.steps.push(`\u23F3 Waiting ${RUNTIME_CHECK_DELAY_MS / 1e3}s for runtime verification...`);
           await sleep(RUNTIME_CHECK_DELAY_MS);
           const runtimeErrors = await readLogsAndParseErrors(meta.name, 500);
-          if (runtimeErrors.length > 0) {
-            result.runtimeErrors = runtimeErrors;
+          const consoleLog = await readServerConsoleLog(300);
+          let consoleErrors = [];
+          if (consoleLog) {
+            result.steps.push(`\u2713 Read server console log: ${path3.basename(consoleLog.path)}`);
+            consoleErrors = parseConsoleErrors(consoleLog.content, meta.name);
+          }
+          const allErrors = [...runtimeErrors, ...consoleErrors];
+          if (allErrors.length > 0) {
+            result.runtimeErrors = runtimeErrors.length > 0 ? runtimeErrors : void 0;
+            result.consoleErrors = consoleErrors.length > 0 ? consoleErrors : void 0;
             result.success = false;
-            result.steps.push(`\u2717 Found ${runtimeErrors.length} runtime error(s) in logs`);
+            result.steps.push(`\u2717 Found ${allErrors.length} error(s) (oxide: ${runtimeErrors.length}, console: ${consoleErrors.length})`);
           } else {
             result.success = true;
-            result.steps.push(`\u2713 No runtime errors in logs after ${RUNTIME_CHECK_DELAY_MS / 1e3}s`);
+            result.steps.push(`\u2713 No runtime errors in logs/console after ${RUNTIME_CHECK_DELAY_MS / 1e3}s`);
           }
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         }
@@ -55242,14 +55531,22 @@ function registerPluginPushTool(server) {
           };
           result.steps.push(`\u23F3 Waiting ${RUNTIME_CHECK_DELAY_MS / 1e3}s for runtime verification...`);
           await sleep(RUNTIME_CHECK_DELAY_MS);
-          const runtimeErrors = await readLogsAndParseErrors(meta.name, 500);
-          if (runtimeErrors.length > 0) {
-            result.runtimeErrors = runtimeErrors;
+          const runtimeErrors2 = await readLogsAndParseErrors(meta.name, 500);
+          const consoleLog2 = await readServerConsoleLog(300);
+          let consoleErrors2 = [];
+          if (consoleLog2) {
+            result.steps.push(`\u2713 Read server console log: ${path3.basename(consoleLog2.path)}`);
+            consoleErrors2 = parseConsoleErrors(consoleLog2.content, meta.name);
+          }
+          const allErrors2 = [...runtimeErrors2, ...consoleErrors2];
+          if (allErrors2.length > 0) {
+            result.runtimeErrors = runtimeErrors2.length > 0 ? runtimeErrors2 : void 0;
+            result.consoleErrors = consoleErrors2.length > 0 ? consoleErrors2 : void 0;
             result.success = false;
-            result.steps.push(`\u2717 Found ${runtimeErrors.length} runtime error(s) in logs`);
+            result.steps.push(`\u2717 Found ${allErrors2.length} error(s) (oxide: ${runtimeErrors2.length}, console: ${consoleErrors2.length})`);
           } else {
             result.success = true;
-            result.steps.push(`\u2713 No runtime errors in logs after ${RUNTIME_CHECK_DELAY_MS / 1e3}s`);
+            result.steps.push(`\u2713 No runtime errors in logs/console after ${RUNTIME_CHECK_DELAY_MS / 1e3}s`);
           }
         } else {
           result.steps.push("\u2717 Plugin NOT found in o.plugins after all attempts");
@@ -55315,6 +55612,67 @@ function registerPluginPushTool(server) {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }]
         };
       }
+    }
+  );
+}
+
+// src/tools/console-log.ts
+function registerConsoleLogTool(server) {
+  server.tool(
+    "rust_read_console_log",
+    "Read last N lines of Rust server console log (output.txt or custom path). Returns raw log lines + detected errors (Exception, prefab not found, etc). Use to diagnose server-side issues not visible in oxide logs.",
+    {
+      lines: external_exports.number().optional().default(300).describe("Number of recent lines to read (default 300, max 1000)"),
+      path: external_exports.string().optional().describe("Custom path to console log file (overrides auto-detection)"),
+      filter_errors: external_exports.boolean().optional().default(false).describe("If true, return only lines matching error patterns")
+    },
+    async ({ lines, path: customPath, filter_errors }) => {
+      const maxLines = Math.min(lines || 300, 1000);
+      let logResult = null;
+      if (customPath) {
+        try {
+          const stat = await fs2.stat(customPath);
+          if (stat.isFile()) {
+            const content = await readFileTail(customPath, maxLines);
+            if (content.length > 10) logResult = { path: customPath, content };
+          }
+        } catch (err) {
+          return { content: [{ type: "text", text: `Cannot read file: ${customPath}. Error: ${err instanceof Error ? err.message : String(err)}` }] };
+        }
+      } else {
+        logResult = await readServerConsoleLog(maxLines);
+      }
+      if (!logResult) {
+        return { content: [{ type: "text", text: "No server console log found. Set RUST_SERVER_PATH or RUST_CONSOLE_LOG_PATH env, or provide path parameter." }] };
+      }
+      const consoleErrors = parseConsoleErrors(logResult.content);
+      if (filter_errors) {
+        if (consoleErrors.length === 0) {
+          return { content: [{ type: "text", text: `No errors found in ${path2.basename(logResult.path)} (last ${maxLines} lines).` }] };
+        }
+        const output = [
+          `=== Console Errors from ${path2.basename(logResult.path)} ===`,
+          `Found ${consoleErrors.length} error(s):`,
+          "",
+          ...consoleErrors.map((e, i) => `[${i + 1}] ${e.message}`)
+        ].join("\n");
+        return { content: [{ type: "text", text: output }] };
+      }
+      const sections = [
+        `=== Server Console Log: ${path2.basename(logResult.path)} ===`,
+        `(last ${maxLines} lines)`,
+        ""
+      ];
+      if (consoleErrors.length > 0) {
+        sections.push(`\u26A0 Found ${consoleErrors.length} error(s):`);
+        for (const e of consoleErrors) {
+          sections.push(`  \u2717 ${e.message}`);
+        }
+        sections.push("");
+      }
+      sections.push("--- Log Content ---");
+      sections.push(logResult.content);
+      return { content: [{ type: "text", text: sections.join("\n") }] };
     }
   );
 }
@@ -74097,6 +74455,8 @@ function registerDiagnosticsTools(server) {
           RUST_RCON_PORT: process.env.RUST_RCON_PORT || "(not set)",
           RUST_RCON_PASSWORD: process.env.RUST_RCON_PASSWORD ? "***set***" : "(not set)",
           RUST_SERVER_PATH: process.env.RUST_SERVER_PATH || "(not set)",
+          RUST_STARTUP_FILE: process.env.RUST_STARTUP_FILE || "(auto-detect start.bat, run.bat)",
+          RUST_CONSOLE_LOG_PATH: process.env.RUST_CONSOLE_LOG_PATH || "(auto-detect output.txt)",
           RUST_DEPLOY_MODE: process.env.RUST_DEPLOY_MODE || "(not set, defaults to local)"
         },
         deploy: {},
@@ -74780,6 +75140,7 @@ function createServer(displayName) {
     { capabilities: { logging: {} } }
   );
   registerPluginPushTool(server);
+  registerConsoleLogTool(server);
   registerPluginManageTools(server);
   registerServerInfoTools(server);
   registerPermissionTools(server);

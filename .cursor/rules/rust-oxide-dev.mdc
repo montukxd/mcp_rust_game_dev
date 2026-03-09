@@ -22,15 +22,17 @@ Each MCP tool has a correct moment. Follow the phase model:
 
 ### Phase B: Deploy — Fix — Redeploy Loop (MANDATORY)
 - Call `rust_plugin_push` after ANY code change — ALWAYS, before finishing your response
-- rust_plugin_push waits 5s, checks oxide logs AND RCON console for runtime errors
-- If `errors` or `runtimeErrors` in result — fix immediately and redeploy. Repeat until success
+- rust_plugin_push waits 5s, checks oxide logs AND RCON console AND server console log (output.txt) for runtime errors
+- If `errors`, `runtimeErrors`, or `consoleErrors` in result — fix immediately and redeploy. Repeat until success
+- `consoleErrors` include: prefab not found, Unity exceptions, plugin initialization failures
 - Grant permissions via `rust_grant_permission` ONLY on first push with new permissions
 - Read config via `rust_read_config` ONLY on first push with config or after config structure change
 - Do NOT ask the user to manually copy, reload, or check anything
 
 ### Phase C: Post-deploy verification
-- rust_plugin_push already checks logs+console after 5s — no separate call needed
+- rust_plugin_push already checks oxide logs + RCON console + server console log (output.txt) after 5s — no separate call needed
 - Call `rust_check_runtime_errors` to re-verify if user reports issues
+- Call `rust_read_console_log` to inspect raw server console output (prefab errors, Unity exceptions)
 - Call `rust_plugin_performance` ONLY for heavy hooks or when user reports lag
 
 ### Phase D: Finalization (plugin is done)

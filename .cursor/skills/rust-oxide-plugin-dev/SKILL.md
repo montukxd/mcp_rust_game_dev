@@ -37,8 +37,8 @@ Plugin development has distinct phases. Each phase has specific tools that are a
 #### Phase B: Deploy — Fix — Redeploy Loop (MANDATORY)
 
 4. **Call `rust_plugin_push` after ANY code change** — ALWAYS, before finishing your response. Do NOT wait for the user to ask.
-   - rust_plugin_push: deploys, waits 5s, checks oxide logs AND RCON console for runtime errors
-   - Returns `errors` (compilation) and `runtimeErrors` (from logs+console). If either present — fix and redeploy immediately.
+   - rust_plugin_push: deploys, waits 5s, checks oxide logs AND RCON console AND server console log (output.txt) for runtime errors
+   - Returns `errors` (compilation), `runtimeErrors` (from oxide logs+RCON), and `consoleErrors` (from server console log — prefab errors, exceptions, etc.). If ANY present — fix and redeploy immediately.
    - Repeat until `success: true` and no errors. Only then give the final response to the user.
 
 5. **On any error** — fix automatically and re-push. Maximum 5 iterations, then ask the user for help.
@@ -53,14 +53,20 @@ Plugin development has distinct phases. Each phase has specific tools that are a
 
 #### Phase C: Post-deploy verification
 
-**rust_plugin_push already checks** oxide logs + RCON console after 5s. No separate call needed for routine deploy.
+**rust_plugin_push already checks** oxide logs + RCON console + server console log (output.txt) after 5s. No separate call needed for routine deploy.
 
 9. **Call `rust_check_runtime_errors` when:**
    - The user reports that something doesn't work as expected
    - You need to re-verify logs after a deploy that completed earlier
-   - **Do NOT skip** rust_plugin_push — it does the 5s wait + log+console check automatically
+   - **Do NOT skip** rust_plugin_push — it does the 5s wait + log+console+server output check automatically
 
-10. **Call `rust_plugin_performance` only when:**
+10. **Call `rust_read_console_log` when:**
+    - You need to inspect the raw server console output (output.txt) separately
+    - The user reports prefab errors, asset errors, or Unity-level exceptions
+    - Use `filter_errors: true` to get only error lines
+    - Use custom `path` parameter if the log file is at a non-standard location
+
+11. **Call `rust_plugin_performance` only when:**
     - The plugin uses high-frequency hooks (`OnTick`, `OnPlayerTick`, `OnEntityTakeDamage`, `OnPlayerInput`)
     - The user reports server lag after loading the plugin
     - The plugin has been running for at least a few minutes with players on the server
@@ -72,13 +78,13 @@ Plugin development has distinct phases. Each phase has specific tools that are a
 
 **Enter this phase when:** the user explicitly says the plugin is done/ready, OR all requested features are implemented and working without errors.
 
-11. **Call `rust_generate_tests` only when:**
+12. **Call `rust_generate_tests` only when:**
     - The plugin's core functionality is stable (compiles, no known runtime errors)
     - The plugin has at least 2-3 of: commands, permissions, config, data, localization — simpler plugins don't benefit from generated tests
     - The user explicitly asks for tests
     - **Do NOT call** during active development when features are still being added or changed — the tests will be immediately outdated
 
-12. **Call `rust_generate_docs` only when:**
+13. **Call `rust_generate_docs` only when:**
     - The user says the plugin is finished / ready for release
     - The user explicitly asks for documentation
     - **Do NOT call** during active development — the docs will be immediately outdated with every code change
@@ -87,12 +93,12 @@ Plugin development has distinct phases. Each phase has specific tools that are a
 
 #### File Watcher (optional continuous mode)
 
-13. **Call `rust_watch_directory` only when:**
+14. **Call `rust_watch_directory` only when:**
     - The user explicitly asks for auto-deploy on save
     - You are entering a rapid iteration cycle where the user will be editing files in their IDE while you monitor
     - **Do NOT call** at session start by default — it adds noise and auto-pushes may deploy half-written code
 
-14. **Call `rust_unwatch_directory`** when leaving the rapid iteration cycle or when the plugin is complete.
+15. **Call `rust_unwatch_directory`** when leaving the rapid iteration cycle or when the plugin is complete.
 
 ---
 
@@ -301,7 +307,8 @@ Follow this flow, but adapt to context. Not every step applies to every situatio
 **2. Write code** — create or modify the .cs file following conventions above
 
 **3. Deploy** (Phase B — ALWAYS after code changes, before finishing response)
-   - `rust_plugin_push` — copy, compile, wait 5s, check oxide logs + RCON console for runtime errors
+   - `rust_plugin_push` — copy, compile, wait 5s, check oxide logs + RCON console + server console log (output.txt) for runtime errors
+   - Returns `errors`, `runtimeErrors`, and `consoleErrors` — check ALL of them
    - Only after push completes (with success or errors) give response to user
    - If errors → fix and re-push (max 5 iterations)
    - First push with permissions → `rust_grant_permission` once
@@ -309,7 +316,8 @@ Follow this flow, but adapt to context. Not every step applies to every situatio
 
 **4. Test** (Phase C — only when there's something to test)
    - User tries commands, triggers hooks on server
-   - If user reports issue → `rust_check_runtime_errors`
+   - If user reports issue → `rust_check_runtime_errors` and/or `rust_read_console_log`
+   - If prefab/asset errors suspected → `rust_read_console_log(filter_errors: true)`
    - If plugin uses heavy hooks → `rust_plugin_performance` after a few minutes of activity
 
 **5. Finalize** (Phase D — only when user says plugin is done)
@@ -338,6 +346,7 @@ Follow this flow, but adapt to context. Not every step applies to every situatio
 | `rust_write_config` | B | Update config values (auto-reloads plugin) |
 | `rust_read_data` | B | Inspect plugin data files |
 | `rust_read_logs` | B-C | Debug compilation or server issues |
+| `rust_read_console_log` | B-C | Read server console log (output.txt) — prefab errors, Unity exceptions |
 | `rust_check_runtime_errors` | C | After user tests plugin or reports issues — NOT after every push |
 | `rust_plugin_performance` | C | When using heavy hooks, or user reports lag — NOT on idle plugins |
 | `rust_server_fps` | C | Quick server health check when lag suspected |
