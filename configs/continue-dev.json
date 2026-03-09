@@ -1,0 +1,22 @@
+{
+  "_comment": "Config for Continue.dev (VS Code / JetBrains). Merge into ~/.continue/config.json. Update 'cwd' to the absolute path where you cloned the repo.",
+  "experimental": {
+    "modelContextProtocolServers": [
+      {
+        "transport": {
+          "type": "stdio",
+          "command": "node",
+          "args": ["dist/index.mjs"],
+          "cwd": "/absolute/path/to/mcp_rust_game_dev/mcp-server",
+          "env": {
+            "RUST_RCON_HOST": "127.0.0.1",
+            "RUST_RCON_PORT": "28016",
+            "RUST_RCON_PASSWORD": "CHANGE_ME",
+            "RUST_SERVER_PATH": "C:/RustServer",
+            "RUST_DEPLOY_MODE": "local"
+          }
+        }
+      }
+    ]
+  }
+}

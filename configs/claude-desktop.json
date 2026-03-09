@@ -1,0 +1,18 @@
+{
+  "$schema": "https://docs.anthropic.com/claude-desktop-config-schema.json",
+  "_comment": "Config for Claude Desktop app. Copy to: %APPDATA%/Claude/claude_desktop_config.json (Windows) or ~/Library/Application Support/Claude/claude_desktop_config.json (macOS). Update 'cwd' to the absolute path where you cloned the repo.",
+  "mcpServers": {
+    "rust-oxide-dev": {
+      "command": "node",
+      "args": ["dist/index.mjs"],
+      "cwd": "/absolute/path/to/mcp_rust_game_dev/mcp-server",
+      "env": {
+        "RUST_RCON_HOST": "127.0.0.1",
+        "RUST_RCON_PORT": "28016",
+        "RUST_RCON_PASSWORD": "CHANGE_ME",
+        "RUST_SERVER_PATH": "C:/RustServer",
+        "RUST_DEPLOY_MODE": "local"
+      }
+    }
+  }
+}

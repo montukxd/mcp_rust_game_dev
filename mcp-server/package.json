@@ -1,0 +1,31 @@
+{
+  "name": "rust-oxide-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Rust/uMod (Oxide) plugin development with hot-reload via WebSocket RCON",
+  "type": "module",
+  "main": "dist/index.mjs",
+  "scripts": {
+    "start": "node dist/index.mjs",
+    "start:http": "node dist/index.mjs --http",
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node18 --format=esm --outfile=dist/index.mjs --external:cpu-features --external:ssh2 --external:basic-ftp --external:ssh2-sftp-client --tree-shaking=true --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\"",
+    "dev": "tsx src/index.ts",
+    "dev:http": "tsx src/index.ts --http",
+    "build:tsc": "tsc"
+  },
+  "optionalDependencies": {
+    "basic-ftp": "^5.2.0",
+    "ssh2-sftp-client": "^12.1.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@types/node": "^22.10.0",
+    "@types/ssh2-sftp-client": "^9.0.6",
+    "@types/ws": "^8.5.13",
+    "cheerio": "^1.0.0",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "ws": "^8.18.0",
+    "zod": "^3.24.0"
+  }
+}

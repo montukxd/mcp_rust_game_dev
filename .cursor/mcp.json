@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "rust-oxide-dev": {
+      "command": "node",
+      "args": ["./mcp-server/dist/index.mjs"],
+      "env": {
+        "RUST_RCON_HOST": "127.0.0.1",
+        "RUST_RCON_PORT": "28016",
+        "RUST_RCON_PASSWORD": "CHANGE_ME",
+        "RUST_SERVER_PATH": "C:/RustServer",
+        "RUST_DEPLOY_MODE": "local",
+
+        "RUST_FTP_HOST": "",
+        "RUST_FTP_PORT": "21",
+        "RUST_FTP_USER": "",
+        "RUST_FTP_PASSWORD": "",
+        "RUST_FTP_PATH": "/oxide/plugins",
+
+        "RUST_SFTP_HOST": "",
+        "RUST_SFTP_PORT": "22",
+        "RUST_SFTP_USER": "",
+        "RUST_SFTP_PASSWORD": "",
+        "RUST_SFTP_KEY": "",
+        "RUST_SFTP_PATH": "/oxide/plugins"
+      }
+    }
+  }
+}

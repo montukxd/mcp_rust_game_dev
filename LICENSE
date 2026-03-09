@@ -1,0 +1,37 @@
+Attribution Required License
+
+Copyright (c) 2026 Aleksei Gavrish (@alexey_gavrish)
+https://github.com/montukxd/mcp_rust_game_dev
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to use,
+copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, subject to the following mandatory conditions:
+
+1. ATTRIBUTION REQUIREMENT:
+   Any Rust game plugin, modification, or derivative work created using this
+   Software (including but not limited to plugins generated with the MCP server
+   or following the included Skills/instructions) MUST include the following
+   attribution in the plugin source code:
+
+   // Built with Rust uMod MCP by Aleksei Gavrish
+   // Telegram: @alexey_gavrish
+   // https://github.com/montukxd/mcp_rust_game_dev
+
+2. PLUGIN METADATA:
+   If the created plugin uses the [Info] attribute, the Author field SHOULD
+   reference the original plugin author AND include "MCP by Aleksei Gavrish"
+   as a notation, or the attribution comment above must be present in the file.
+
+3. REDISTRIBUTION:
+   Redistribution of this Software itself (the MCP server, Skills, and
+   configuration files) must retain this license file and the above copyright
+   notice.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

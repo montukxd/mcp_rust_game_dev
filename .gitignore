@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+
+# Source code (only bundled dist/ is shipped)
+mcp-server/src/
+
+# Build artifacts except the bundle
+mcp-server/dist/*
+!mcp-server/dist/index.mjs
+
+# TypeScript
+*.tsbuildinfo
+*.d.ts
+*.d.ts.map
+*.js.map
+
+# Environment & secrets
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE local state
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Cursor local state
+agent-transcripts/
+terminals/
+mcps/
+
+# MCP documentation cache
+.rust-mcp-cache/
+
+# Logs
+*.log
+
+# Dev/internal files (not needed by users)
+mcp-server/package-lock.json
+mcp-server/tsconfig.json
+ROADMAP.md
+TECH_SPEC.md

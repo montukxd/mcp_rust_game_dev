@@ -1,0 +1,51 @@
+---
+description: Rules for Rust Oxide/uMod plugin development workflow
+globs: ["**/*.cs"]
+alwaysApply: false
+---
+
+# Rust Oxide/uMod Plugin Development Rules
+
+## Tool Invocation Policy
+
+Each MCP tool has a correct moment. Follow the phase model:
+
+### Phase A: Research (before writing code)
+- BEFORE writing plugin code, search for hooks with `rust_docs_search_hook`
+- BEFORE using any hook, get its exact signature with `rust_docs_get_hook`
+- NEVER guess hook signatures — always verify against live documentation
+- Skip if you already looked up the same hooks earlier in this session
+
+### Phase B: Active Development (iterating on code)
+- Call `rust_plugin_push` after **meaningful** code changes — NOT after every minor edit
+- Meaningful = new/changed hook, command, config structure, bug fix
+- NOT meaningful = comment edit, variable rename, whitespace, mid-edit incomplete state
+- Do NOT ask the user to manually copy, reload, or check anything
+- If compilation fails, fix errors automatically and push again (max 5 attempts)
+- Grant permissions via `rust_grant_permission` ONLY on first push with new permissions
+- Read config via `rust_read_config` ONLY on first push with config or after config structure change
+
+### Phase C: Stabilization (testing for runtime issues)
+- Call `rust_check_runtime_errors` ONLY when user tests plugin and reports issues, or after deploying complex logic
+- Call `rust_plugin_performance` ONLY for plugins with heavy hooks (OnTick, OnEntityTakeDamage) or when user reports lag
+- Do NOT call these after every push — they need actual server activity to produce data
+
+### Phase D: Finalization (plugin is done)
+- Call `rust_generate_tests` ONLY when plugin is feature-stable and user confirms it's ready
+- Call `rust_generate_docs` ONLY when user says plugin is complete / ready for release
+- Do NOT call these during active development — output is immediately outdated
+
+## Plugin Structure
+- All plugins use `namespace Oxide.Plugins;`
+- All plugins have `[Info("Name", "Author", "Version")]` — name MUST match filename
+- All plugins inherit from `RustPlugin` (preferred) or `CovalencePlugin`
+
+## Cleanup in Unload()
+- ALWAYS destroy repeating timers
+- ALWAYS destroy CUI for all players
+- ALWAYS save data if applicable
+
+## Error Handling
+- Check entity validity: `entity != null && !entity.IsDestroyed`
+- Wrap config loading in try/catch
+- Use `PrintError()` / `PrintWarning()` for diagnostics

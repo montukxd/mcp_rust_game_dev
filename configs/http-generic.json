@@ -1,0 +1,20 @@
+{
+  "_comment": "Generic HTTP config for any MCP client that supports Streamable HTTP transport (OpenAI, custom clients, etc.)",
+  "_usage": "Start server with: cd mcp-server && npm run start:http",
+  "mcpServers": {
+    "rust-oxide-dev": {
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://localhost:3100/mcp"
+      }
+    }
+  },
+  "_env_required": {
+    "RUST_RCON_HOST": "Rust server RCON IP (default: 127.0.0.1)",
+    "RUST_RCON_PORT": "Rust server RCON port (default: 28016)",
+    "RUST_RCON_PASSWORD": "RCON password",
+    "RUST_SERVER_PATH": "Local path to Rust server root (for local deploy)",
+    "RUST_DEPLOY_MODE": "local | ftp | sftp (default: local)",
+    "MCP_PORT": "HTTP server port (default: 3100)"
+  }
+}
