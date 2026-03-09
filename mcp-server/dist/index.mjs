@@ -10193,10 +10193,10 @@ var require_websocket_server = __commonJS({
             process.nextTick(emitClose, this);
           }
         } else {
-          const server2 = this._server;
+          const server = this._server;
           this._removeListeners();
           this._removeListeners = this._server = null;
-          server2.close(() => {
+          server.close(() => {
             emitClose(this);
           });
         }
@@ -10379,17 +10379,17 @@ var require_websocket_server = __commonJS({
       }
     };
     module.exports = WebSocketServer2;
-    function addListeners(server2, map2) {
-      for (const event of Object.keys(map2)) server2.on(event, map2[event]);
+    function addListeners(server, map2) {
+      for (const event of Object.keys(map2)) server.on(event, map2[event]);
       return function removeListeners() {
         for (const event of Object.keys(map2)) {
-          server2.removeListener(event, map2[event]);
+          server.removeListener(event, map2[event]);
         }
       };
     }
-    function emitClose(server2) {
-      server2._state = CLOSED;
-      server2.emit("close");
+    function emitClose(server) {
+      server._state = CLOSED;
+      server.emit("close");
     }
     function socketOnError() {
       this.destroy();
@@ -10408,11 +10408,11 @@ var require_websocket_server = __commonJS({
 ` + Object.keys(headers).map((h) => `${h}: ${headers[h]}`).join("\r\n") + "\r\n\r\n" + message
       );
     }
-    function abortHandshakeOrEmitwsClientError(server2, req, socket, code, message, headers) {
-      if (server2.listenerCount("wsClientError")) {
+    function abortHandshakeOrEmitwsClientError(server, req, socket, code, message, headers) {
+      if (server.listenerCount("wsClientError")) {
         const err = new Error(message);
         Error.captureStackTrace(err, abortHandshakeOrEmitwsClientError);
-        server2.emit("wsClientError", err, socket, req);
+        server.emit("wsClientError", err, socket, req);
       } else {
         abortHandshake(socket, code, message, headers);
       }
@@ -54731,8 +54731,8 @@ function parseCompilationErrors(logOutput, pluginName) {
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-function registerPluginPushTool(server2) {
-  server2.tool(
+function registerPluginPushTool(server) {
+  server.tool(
     "rust_plugin_push",
     "Deploy a .cs plugin to Rust server: validate \u2192 copy \u2192 compile \u2192 check errors. Returns step-by-step diagnostics and raw RCON output. WHEN TO USE: After meaningful code changes (new hook, new command, bug fix). Do NOT push mid-edit when the file is knowingly incomplete.",
     {
@@ -54934,8 +54934,8 @@ function registerPluginPushTool(server2) {
 }
 
 // src/tools/plugin-manage.ts
-function registerPluginManageTools(server2) {
-  server2.tool(
+function registerPluginManageTools(server) {
+  server.tool(
     "rust_plugin_load",
     "Load an Oxide plugin by name (o.load)",
     { plugin_name: external_exports.string().describe("Plugin name (case-sensitive)") },
@@ -54946,7 +54946,7 @@ function registerPluginManageTools(server2) {
       return { content: [{ type: "text", text: result }] };
     }
   );
-  server2.tool(
+  server.tool(
     "rust_plugin_unload",
     "Unload an Oxide plugin by name (o.unload)",
     { plugin_name: external_exports.string().describe("Plugin name (case-sensitive)") },
@@ -54957,7 +54957,7 @@ function registerPluginManageTools(server2) {
       return { content: [{ type: "text", text: result }] };
     }
   );
-  server2.tool(
+  server.tool(
     "rust_plugin_reload",
     "Reload an Oxide plugin by name (o.reload). Does NOT restart the server.",
     { plugin_name: external_exports.string().describe("Plugin name (case-sensitive)") },
@@ -54968,7 +54968,7 @@ function registerPluginManageTools(server2) {
       return { content: [{ type: "text", text: result }] };
     }
   );
-  server2.tool(
+  server.tool(
     "rust_list_plugins",
     "List all loaded Oxide plugins with versions",
     {},
@@ -54982,8 +54982,8 @@ function registerPluginManageTools(server2) {
 }
 
 // src/tools/server-info.ts
-function registerServerInfoTools(server2) {
-  server2.tool(
+function registerServerInfoTools(server) {
+  server.tool(
     "rust_server_command",
     "Execute any RCON command on the Rust server and return raw output",
     {
@@ -54996,7 +54996,7 @@ function registerServerInfoTools(server2) {
       return { content: [{ type: "text", text: result }] };
     }
   );
-  server2.tool(
+  server.tool(
     "rust_server_status",
     "Get Rust server status: hostname, players, fps, Oxide version",
     {},
@@ -55020,8 +55020,8 @@ function registerServerInfoTools(server2) {
 }
 
 // src/tools/permissions.ts
-function registerPermissionTools(server2) {
-  server2.tool(
+function registerPermissionTools(server) {
+  server.tool(
     "rust_grant_permission",
     "Grant an Oxide permission to a user or group",
     {
@@ -55038,7 +55038,7 @@ function registerPermissionTools(server2) {
       return { content: [{ type: "text", text: result }] };
     }
   );
-  server2.tool(
+  server.tool(
     "rust_revoke_permission",
     "Revoke an Oxide permission from a user or group",
     {
@@ -55055,7 +55055,7 @@ function registerPermissionTools(server2) {
       return { content: [{ type: "text", text: result }] };
     }
   );
-  server2.tool(
+  server.tool(
     "rust_show_permissions",
     "Show permissions for a user or group",
     {
@@ -55072,8 +55072,8 @@ function registerPermissionTools(server2) {
 }
 
 // src/tools/console.ts
-function registerConsoleTools(server2) {
-  server2.tool(
+function registerConsoleTools(server) {
+  server.tool(
     "rust_console_command",
     "Execute a raw console command on the Rust server via RCON",
     {
@@ -55091,8 +55091,8 @@ function registerConsoleTools(server2) {
 // src/tools/logs.ts
 import fs3 from "fs/promises";
 import path3 from "path";
-function registerLogTools(server2) {
-  server2.tool(
+function registerLogTools(server) {
+  server.tool(
     "rust_read_logs",
     "Read Oxide logs from the server. Supports filtering by plugin name and severity.",
     {
@@ -55166,8 +55166,8 @@ function registerLogTools(server2) {
 // src/tools/config-data.ts
 import fs4 from "fs/promises";
 import path4 from "path";
-function registerConfigDataTools(server2) {
-  server2.tool(
+function registerConfigDataTools(server) {
+  server.tool(
     "rust_read_config",
     "Read a plugin's configuration file from oxide/config/",
     {
@@ -55201,7 +55201,7 @@ function registerConfigDataTools(server2) {
       }
     }
   );
-  server2.tool(
+  server.tool(
     "rust_write_config",
     "Write a plugin's configuration and automatically reload the plugin",
     {
@@ -55253,7 +55253,7 @@ Reload result: ${reloadResult}`
       }
     }
   );
-  server2.tool(
+  server.tool(
     "rust_read_data",
     "Read a plugin's data file from oxide/data/",
     {
@@ -71984,8 +71984,8 @@ async function findMergedGuides(query, limit) {
   }
   return merged.slice(0, limit);
 }
-function registerOxideDocsTools(server2) {
-  server2.tool(
+function registerOxideDocsTools(server) {
+  server.tool(
     "rust_docs_search_hook",
     "Search Oxide hooks by keyword. Returns matching hooks from the 700+ hook index with categories and signatures. Use this first to find which hooks exist, then rust_docs_get_hook for full details.",
     {
@@ -72060,7 +72060,7 @@ Use rust_docs_get_hook(category, hook_name) for full documentation, example code
       };
     }
   );
-  server2.tool(
+  server.tool(
     "rust_docs_search",
     "Search Oxide documentation across ALL sources: hooks (700+) and guides/API. Returns both matching hooks and guide pages. Use when the topic could be a hook, a guide, or both (e.g. 'phone', 'timer', 'database', 'CUI').",
     {
@@ -72147,7 +72147,7 @@ Use rust_docs_get_hook(category, hook_name) for hook details, or rust_docs_searc
       };
     }
   );
-  server2.tool(
+  server.tool(
     "rust_docs_get_hook",
     "Get detailed documentation for a specific Oxide hook from docs.oxidemod.com. Returns signature, parameters, return behavior, example code, and source location. Use rust_docs_search_hook first to find the correct category and name.",
     {
@@ -72202,7 +72202,7 @@ Verify category and name at https://docs.oxidemod.com/hooks/`
       }
     }
   );
-  server2.tool(
+  server.tool(
     "rust_docs_search_api",
     `Search Oxide/uMod developer documentation on docs.oxidemod.com.
 Covers: timers, web requests, permissions, CUI/UI, database, data storage, coroutines, pooling, attributes, commands, plugin lifecycle, server lifecycle, best practices, localization, and more.
@@ -72310,7 +72310,7 @@ Try browsing: https://docs.oxidemod.com/guides/`
       }
     }
   );
-  server2.tool(
+  server.tool(
     "rust_docs_get_examples",
     "Get code examples for Oxide plugin development patterns (config, CUI, timers, database, data storage, permissions, hooks, web requests, coroutines, pooling, etc.).",
     {
@@ -72381,7 +72381,7 @@ ${allExamples.join("\n\n")}`
       };
     }
   );
-  server2.tool(
+  server.tool(
     "rust_docs_fetch_wiki",
     `Fetch and parse a page from Rust Wiki (wiki.facepunch.com/rust). Use for Entities, Animals, Hooks, Modding, CSharp_Basics, Coroutines, Protobuf, items (Clan Table, 8x Zoom Scope), etc. Returns full parsed content.`,
     {
@@ -72417,7 +72417,7 @@ ${parsed.content}`
       };
     }
   );
-  server2.tool(
+  server.tool(
     "rust_docs_search_wiki",
     "Search Rust Wiki (wiki.facepunch.com/rust) by keyword. Returns matching pages from sidebar: categories (Hooks, Modding, Entities), items (Clan Table, 8x Zoom Scope, AK, etc). Use rust_docs_fetch_wiki to fetch a page.",
     {
@@ -72448,7 +72448,7 @@ Use rust_docs_fetch_wiki(page) to fetch content.`
       };
     }
   );
-  server2.tool(
+  server.tool(
     "rust_docs_fetch_umod",
     `Try to fetch umod.org documentation page. umod is SPA \u2014 often times out; use as fallback. Pages: documentation/games/rust, documentation/getting-started, documentation/api/overview.`,
     {
@@ -72489,7 +72489,7 @@ Open in browser: ${url}`
       }
     }
   );
-  server2.tool(
+  server.tool(
     "rust_docs_browse",
     `List all available documentation resources for Oxide/uMod plugin development.
 Returns links to docs.oxidemod.com (developer reference, hooks, API) and umod.org (plugin catalog, community, Rust-specific docs).
@@ -72644,8 +72644,8 @@ function extractPluginName(content) {
   );
   return match ? match[1] : null;
 }
-function registerFileWatcherTools(server2) {
-  server2.tool(
+function registerFileWatcherTools(server) {
+  server.tool(
     "rust_watch_directory",
     "Start auto-deploying .cs files on save. WHEN TO USE: Only when the user explicitly asks for auto-deploy, or during a rapid iteration cycle. Do NOT start at session begin by default \u2014 it may deploy half-written code.",
     {
@@ -72730,7 +72730,7 @@ ${watched.map((d) => `  - ${d}`).join("\n")}`
       };
     }
   );
-  server2.tool(
+  server.tool(
     "rust_unwatch_directory",
     "Stop watching a directory for file changes",
     {
@@ -72762,7 +72762,7 @@ ${watched.map((d) => `  - ${d}`).join("\n")}`
       };
     }
   );
-  server2.tool(
+  server.tool(
     "rust_watch_status",
     "Get file watcher status: watched directories, last change event, and auto-push history",
     {},
@@ -73021,8 +73021,8 @@ function suggestFix(error2) {
   }
   return suggestions.join("\n");
 }
-function registerRuntimeErrorTools(server2) {
-  server2.tool(
+function registerRuntimeErrorTools(server) {
+  server.tool(
     "rust_check_runtime_errors",
     "Parse runtime errors from Oxide logs with fix suggestions. WHEN TO USE: After the user tests plugin functionality (runs commands, triggers hooks) and reports issues, or after deploying a plugin that interacts with players/entities. Do NOT use immediately after every push \u2014 runtime errors only appear when plugin code is actually exercised.",
     {
@@ -73367,8 +73367,8 @@ function generateTestPlugin(analysis) {
   lines.push(`}`);
   return lines.join("\n");
 }
-function registerTestGeneratorTools(server2) {
-  server2.tool(
+function registerTestGeneratorTools(server) {
+  server.tool(
     "rust_generate_tests",
     "Generate a companion test plugin for a .cs plugin. WHEN TO USE: Only when the plugin is feature-stable and compiles without errors. Do NOT use during active development \u2014 tests will be immediately outdated. Best for plugins with 2+ features (commands, permissions, config, lang).",
     {
@@ -73440,7 +73440,7 @@ function registerTestGeneratorTools(server2) {
       }
     }
   );
-  server2.tool(
+  server.tool(
     "rust_analyze_plugin",
     "Analyze a plugin .cs file and return structured information about commands, hooks, permissions, config, data usage, CUI, and timers.",
     {
@@ -73504,8 +73504,8 @@ function parsePerformanceOutput(output) {
   }
   return results;
 }
-function registerPerformanceTools(server2) {
-  server2.tool(
+function registerPerformanceTools(server) {
+  server.tool(
     "rust_plugin_performance",
     "Get plugin performance metrics: hook times, call counts. WHEN TO USE: When the plugin uses high-frequency hooks (OnTick, OnPlayerTick, OnEntityTakeDamage) or user reports server lag. Do NOT use on freshly pushed plugins with no server activity \u2014 there will be no meaningful data.",
     {
@@ -73622,7 +73622,7 @@ function registerPerformanceTools(server2) {
       };
     }
   );
-  server2.tool(
+  server.tool(
     "rust_server_fps",
     "Get current server FPS and basic health metrics. Quick check for server performance.",
     {},
@@ -73917,8 +73917,8 @@ function generateMarkdownDoc(doc) {
   lines.push("");
   return lines.join("\n");
 }
-function registerDocGeneratorTools(server2) {
-  server2.tool(
+function registerDocGeneratorTools(server) {
+  server.tool(
     "rust_generate_docs",
     "Generate Markdown/JSON documentation for a finished plugin. WHEN TO USE: Only when the plugin is feature-complete and the user says it's ready for release. Do NOT use during active development \u2014 docs will be outdated with every code change.",
     {
@@ -73986,8 +73986,8 @@ function registerDocGeneratorTools(server2) {
 // src/tools/diagnostics.ts
 import fs11 from "fs/promises";
 import path10 from "path";
-function registerDiagnosticsTools(server2) {
-  server2.tool(
+function registerDiagnosticsTools(server) {
+  server.tool(
     "rust_test_connection",
     "Diagnostic tool: tests RCON connection, deploy path, and env variables. Use when setup issues are suspected.",
     {},
@@ -74675,114 +74675,117 @@ process.on("unhandledRejection", (reason, promise) => {
 process.on("uncaughtException", (err) => {
   console.error("[rust-oxide-dev] Uncaught exception:", err);
 });
-var server = new McpServer({
-  name: "rust-oxide-dev",
-  version: "1.0.0"
-});
-registerPluginPushTool(server);
-registerPluginManageTools(server);
-registerServerInfoTools(server);
-registerPermissionTools(server);
-registerConsoleTools(server);
-registerLogTools(server);
-registerConfigDataTools(server);
-registerOxideDocsTools(server);
-registerFileWatcherTools(server);
-registerRuntimeErrorTools(server);
-registerTestGeneratorTools(server);
-registerPerformanceTools(server);
-registerDocGeneratorTools(server);
-registerDiagnosticsTools(server);
-server.resource("hooks-index", "oxide://hooks/index", async (uri) => ({
-  contents: [
-    {
-      uri: uri.href,
-      mimeType: "text/plain",
-      text: formatHooksIndex()
-    }
-  ]
-}));
-server.resource("template-basic", "oxide://templates/basic", async (uri) => ({
-  contents: [
-    { uri: uri.href, mimeType: "text/x-csharp", text: TEMPLATE_BASIC }
-  ]
-}));
-server.resource("template-config", "oxide://templates/config", async (uri) => ({
-  contents: [
-    { uri: uri.href, mimeType: "text/x-csharp", text: TEMPLATE_CONFIG }
-  ]
-}));
-server.resource("template-data", "oxide://templates/data", async (uri) => ({
-  contents: [
-    { uri: uri.href, mimeType: "text/x-csharp", text: TEMPLATE_DATA }
-  ]
-}));
-server.resource("template-cui", "oxide://templates/cui", async (uri) => ({
-  contents: [
-    { uri: uri.href, mimeType: "text/x-csharp", text: TEMPLATE_CUI }
-  ]
-}));
-server.resource(
-  "template-permissions",
-  "oxide://templates/permissions",
-  async (uri) => ({
-    contents: [
-      { uri: uri.href, mimeType: "text/x-csharp", text: TEMPLATE_PERMISSIONS }
-    ]
-  })
-);
-server.resource("template-lang", "oxide://templates/lang", async (uri) => ({
-  contents: [
-    { uri: uri.href, mimeType: "text/x-csharp", text: TEMPLATE_LANG }
-  ]
-}));
-server.resource("api-timers", "oxide://api/timers", async (uri) => ({
-  contents: [{ uri: uri.href, mimeType: "text/markdown", text: API_TIMERS }]
-}));
-server.resource("api-permissions", "oxide://api/permissions", async (uri) => ({
-  contents: [
-    { uri: uri.href, mimeType: "text/markdown", text: API_PERMISSIONS }
-  ]
-}));
-server.resource("api-cui", "oxide://api/cui", async (uri) => ({
-  contents: [{ uri: uri.href, mimeType: "text/markdown", text: API_CUI }]
-}));
-server.resource("api-webrequest", "oxide://api/webrequest", async (uri) => ({
-  contents: [
-    { uri: uri.href, mimeType: "text/markdown", text: API_WEBREQUEST }
-  ]
-}));
-server.resource("api-lang", "oxide://api/lang", async (uri) => ({
-  contents: [{ uri: uri.href, mimeType: "text/markdown", text: API_LANG }]
-}));
-server.resource("conventions", "oxide://conventions", async (uri) => ({
-  contents: [
-    { uri: uri.href, mimeType: "text/markdown", text: CODING_CONVENTIONS }
-  ]
-}));
-server.resource("commands", "oxide://commands", async (uri) => ({
-  contents: [
-    { uri: uri.href, mimeType: "text/markdown", text: OXIDE_COMMANDS }
-  ]
-}));
-server.resource("common-errors", "oxide://errors", async (uri) => ({
-  contents: [
-    { uri: uri.href, mimeType: "text/markdown", text: COMMON_ERRORS }
-  ]
-}));
-server.resource(
-  "system-prompt",
-  "oxide://system-prompt",
-  async (uri) => ({
+function createServer(displayName) {
+  const server = new McpServer({
+    name: displayName,
+    version: "1.0.0"
+  });
+  registerPluginPushTool(server);
+  registerPluginManageTools(server);
+  registerServerInfoTools(server);
+  registerPermissionTools(server);
+  registerConsoleTools(server);
+  registerLogTools(server);
+  registerConfigDataTools(server);
+  registerOxideDocsTools(server);
+  registerFileWatcherTools(server);
+  registerRuntimeErrorTools(server);
+  registerTestGeneratorTools(server);
+  registerPerformanceTools(server);
+  registerDocGeneratorTools(server);
+  registerDiagnosticsTools(server);
+  server.resource("hooks-index", "oxide://hooks/index", async (uri) => ({
     contents: [
       {
         uri: uri.href,
-        mimeType: "text/markdown",
-        text: SYSTEM_PROMPT
+        mimeType: "text/plain",
+        text: formatHooksIndex()
       }
     ]
-  })
-);
+  }));
+  server.resource("template-basic", "oxide://templates/basic", async (uri) => ({
+    contents: [
+      { uri: uri.href, mimeType: "text/x-csharp", text: TEMPLATE_BASIC }
+    ]
+  }));
+  server.resource("template-config", "oxide://templates/config", async (uri) => ({
+    contents: [
+      { uri: uri.href, mimeType: "text/x-csharp", text: TEMPLATE_CONFIG }
+    ]
+  }));
+  server.resource("template-data", "oxide://templates/data", async (uri) => ({
+    contents: [
+      { uri: uri.href, mimeType: "text/x-csharp", text: TEMPLATE_DATA }
+    ]
+  }));
+  server.resource("template-cui", "oxide://templates/cui", async (uri) => ({
+    contents: [
+      { uri: uri.href, mimeType: "text/x-csharp", text: TEMPLATE_CUI }
+    ]
+  }));
+  server.resource(
+    "template-permissions",
+    "oxide://templates/permissions",
+    async (uri) => ({
+      contents: [
+        { uri: uri.href, mimeType: "text/x-csharp", text: TEMPLATE_PERMISSIONS }
+      ]
+    })
+  );
+  server.resource("template-lang", "oxide://templates/lang", async (uri) => ({
+    contents: [
+      { uri: uri.href, mimeType: "text/x-csharp", text: TEMPLATE_LANG }
+    ]
+  }));
+  server.resource("api-timers", "oxide://api/timers", async (uri) => ({
+    contents: [{ uri: uri.href, mimeType: "text/markdown", text: API_TIMERS }]
+  }));
+  server.resource("api-permissions", "oxide://api/permissions", async (uri) => ({
+    contents: [
+      { uri: uri.href, mimeType: "text/markdown", text: API_PERMISSIONS }
+    ]
+  }));
+  server.resource("api-cui", "oxide://api/cui", async (uri) => ({
+    contents: [{ uri: uri.href, mimeType: "text/markdown", text: API_CUI }]
+  }));
+  server.resource("api-webrequest", "oxide://api/webrequest", async (uri) => ({
+    contents: [
+      { uri: uri.href, mimeType: "text/markdown", text: API_WEBREQUEST }
+    ]
+  }));
+  server.resource("api-lang", "oxide://api/lang", async (uri) => ({
+    contents: [{ uri: uri.href, mimeType: "text/markdown", text: API_LANG }]
+  }));
+  server.resource("conventions", "oxide://conventions", async (uri) => ({
+    contents: [
+      { uri: uri.href, mimeType: "text/markdown", text: CODING_CONVENTIONS }
+    ]
+  }));
+  server.resource("commands", "oxide://commands", async (uri) => ({
+    contents: [
+      { uri: uri.href, mimeType: "text/markdown", text: OXIDE_COMMANDS }
+    ]
+  }));
+  server.resource("common-errors", "oxide://errors", async (uri) => ({
+    contents: [
+      { uri: uri.href, mimeType: "text/markdown", text: COMMON_ERRORS }
+    ]
+  }));
+  server.resource(
+    "system-prompt",
+    "oxide://system-prompt",
+    async (uri) => ({
+      contents: [
+        {
+          uri: uri.href,
+          mimeType: "text/markdown",
+          text: SYSTEM_PROMPT
+        }
+      ]
+    })
+  );
+  return server;
+}
 function formatHooksIndex() {
   const categories = /* @__PURE__ */ new Map();
   for (const hook of HOOKS_INDEX) {
@@ -74865,28 +74868,37 @@ This is a license requirement. NEVER omit it. NEVER ask the user whether to incl
 - Never store player references long-term
 - Always destroy timers and CUI in \`Unload()\`
 `;
-async function verifyRconAtStartup() {
+async function verifyRconAndGetServerName() {
   const password = process.env.RUST_RCON_PASSWORD;
-  if (!password || password === "CHANGE_ME") return;
+  if (!password || password === "CHANGE_ME") return null;
+  const host = process.env.RUST_RCON_HOST || "127.0.0.1";
+  const port = process.env.RUST_RCON_PORT || "28016";
   try {
     const rcon = getRconClient();
     await rcon.connect();
-    await rcon.send("status");
+    const status = await rcon.send("status");
+    const firstLine = status.split("\n")[0]?.trim() || "";
+    let hostname2 = firstLine;
+    if (!hostname2) {
+      const hostnameResp = await rcon.send("server.hostname");
+      hostname2 = hostnameResp?.trim() || `${host}:${port}`;
+    }
+    return hostname2.slice(0, 80) || `${host}:${port}`;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    const host = process.env.RUST_RCON_HOST || "127.0.0.1";
-    const port = process.env.RUST_RCON_PORT || "28016";
     console.error(
       `[rust-oxide-dev] RCON connection failed at startup: ${msg}
   Host: ${host}:${port}
   Ensure +rcon.web 1 +rcon.port ${port} +rcon.password "..." in server startup.
-  Fix config and restart MCP.`
+  MCP will not start without RCON. Fix config and restart.`
     );
     process.exit(1);
   }
 }
 async function main() {
-  await verifyRconAtStartup();
+  const serverName = await verifyRconAndGetServerName();
+  const displayName = serverName ? `rust-oxide-dev | ${serverName}` : "rust-oxide-dev";
+  const server = createServer(displayName);
   const mode = process.argv.includes("--http") ? "http" : "stdio";
   if (mode === "http") {
     const port = parseInt(process.env.MCP_PORT || "3100", 10);

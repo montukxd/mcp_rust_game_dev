@@ -6,8 +6,8 @@
       "env": {
         "RUST_RCON_HOST": "127.0.0.1",
         "RUST_RCON_PORT": "28016",
-        "RUST_RCON_PASSWORD": "CHANGE_ME",
-        "RUST_SERVER_PATH": "C:/RustServer",
+        "RUST_RCON_PASSWORD": "m0nty12345678XXX",
+        "RUST_SERVER_PATH": "C:/Rust_Server/Server/rustds",
         "RUST_DEPLOY_MODE": "local",
 
         "RUST_FTP_HOST": "",
